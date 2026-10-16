@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adwsearch"
+dynamic = ["version"]
+description = "ldapsearch-style CLI to query Active Directory over ADWS (SOAP over TCP/9389)"
+readme = "README.md"
+requires-python = ">=3.10"
+# Original ADWSearch contributions are MPL-2.0. The distribution also contains
+# upstream-derived portions; AND is cumulative, not a choice of licenses.
+license = "MPL-2.0 AND MIT AND LicenseRef-Impacket"
+authors = [{name = "Hexboi"}]
+license-files = ["LICENSE", "NOTICE"]
+
+dependencies = [
+    # Authentication helpers are API-sensitive; support the verified 0.13.1 baseline.
+    "impacket>=0.13.1,<0.14",
+    "pysocks>=1.7.1",
+    # Imported directly as ``from Cryptodome.Cipher import ARC4`` in auth/ntlm.py.
+    # It is pulled in transitively by impacket today, but we declare it explicitly
+    # so the install stays correct if impacket ever drops the dependency.
+    "pycryptodomex>=3.19",
+    # X.509 parsing for certdump (NTAuthCertificates + CA certs). Imported by
+    # ``adwsearch.dump.certdump`` to decode cACertificate blobs.
+    "cryptography>=42",
+]
+
+[project.urls]
+Author = "https://github.com/Hexboi"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-cov>=5", "ruff>=0.9", "mypy>=1.10", "build>=1.2"]
+
+[tool.setuptools.dynamic]
+version = {attr = "adwsearch.__version__"}
+
+[project.scripts]
+adwsearch = "adwsearch.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["adwsearch*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = ["lab: explicitly enabled live domain-controller tests", "performance: synthetic memory and throughput checks"]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.10"
+follow_imports = "silent"
+
+[[tool.mypy.overrides]]
+module = ["impacket.*", "Cryptodome.*"]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+omit = ["*/transport/nbf/nbfs_dictionary.py"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 87
