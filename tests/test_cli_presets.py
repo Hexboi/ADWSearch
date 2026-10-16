@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 # Copyright (c) 2026 Hexboi (https://github.com/Hexboi)
 
-"""CLI dispatch to enumeration presets (Fase 7).
+"""CLI dispatch to enumeration presets (Phase 7).
 
 Same monkeypatch pattern as test_cli.py: fake connect_adws + fake AdwsClient so
 the tests exercise the full argparse → validation → preset → writer pipeline

@@ -1,116 +1,116 @@
 # ADWSearch
 
-ADWSearch è uno strumento per consultare **Active Directory tramite ADWS** (Active Directory Web Services), normalmente sulla porta TCP **9389**, invece di usare il protocollo LDAP.
+ADWSearch is a tool for querying **Active Directory through ADWS** (Active Directory Web Services), usually on TCP port **9389**, rather than using the LDAP protocol.
 
-Serve a raccogliere informazioni sul dominio, individuare configurazioni da approfondire durante un assessment ed esportare dati per successive analisi. 
+Use it to collect domain information, identify configurations that need further assessment, and export data for later analysis.
 
-Il programma opera **in sola lettura**: non modifica oggetti, permessi o configurazioni del dominio. I risultati dipendono dai diritti dell'account utilizzato. Usalo esclusivamente in ambienti per i quali hai un'autorizzazione.
+The tool is **read-only**: it does not modify domain objects, permissions, or configuration. Results depend on the permissions of the account you use. Only run it in environments you are authorized to assess.
 
-## Quali controlli esegue
+## Available checks
 
-Scegli un controllo con `--preset NOME`:
+Select a check with `--preset NAME`:
 
-| Preset | Cosa mostra |
+| Preset | What it shows |
 | --- | --- |
-| `forest-level` | Il livello funzionale del dominio indicato come base. |
-| `maq` | La quota che regola l'aggiunta di computer al dominio. |
-| `asrep` | Gli account utente senza preautenticazione Kerberos, da approfondire per il rischio AS-REP roasting. |
-| `kerberoastable` | Gli account utente abilitati con SPN, da approfondire per il rischio Kerberoasting. |
-| `spn` | Gli oggetti con servizi registrati tramite SPN, inclusi utenti e computer. |
-| `writable` | I diritti effettivi esposti per l'account su attributi, permessi e creazione di oggetti figli, senza tentare modifiche. |
-| `dns-dump` | I record DNS presenti nelle partizioni di Active Directory accessibili all'account. |
+| `forest-level` | The functional level of the domain specified as the search base. |
+| `maq` | The quota that controls how many computers an account can add to the domain. |
+| `asrep` | User accounts without Kerberos preauthentication, for further assessment of AS-REP roasting exposure. |
+| `kerberoastable` | Enabled user accounts with SPNs, for further assessment of Kerberoasting exposure. |
+| `spn` | Objects with registered service principal names, including users and computers. |
+| `writable` | Effective rights exposed for the current account on attributes, permissions, and child-object creation, without attempting changes. |
+| `dns-dump` | DNS records in Active Directory partitions accessible to the account. |
 
-Sono controlli di configurazione: **non estraggono password, non eseguono roasting e non provano automaticamente la sfruttabilità delle condizioni rilevate**.
+These are configuration checks: **they do not extract passwords, perform roasting, or automatically prove that a finding is exploitable**.
 
-Con `--dump` puoi inoltre:
+The `--dump` modes also let you:
 
-- `buildcache`: creare una cache JSON degli identificativi degli oggetti.
-- `showstats`: leggere le statistiche della cache, senza collegarti al dominio.
-- `bhdump`: esportare oggetti e relazioni in JSON per analisi con BloodHound; non raccoglie sessioni o informazioni locali dagli host.
-- `certdump`: raccogliere CA, template e certificati attendibili di AD CS e segnalare possibili configurazioni rischiose. Non richiede certificati e non verifica endpoint HTTP/RPC o impostazioni locali delle CA.
+- `buildcache`: create a JSON cache of object identifiers.
+- `showstats`: read cache statistics without connecting to the domain.
+- `bhdump`: export objects and relationships as JSON for BloodHound analysis; it does not collect sessions or local host information.
+- `certdump`: collect AD CS CAs, templates, and trusted certificates, and flag potentially risky configurations. It does not request certificates or check HTTP/RPC endpoints or local CA settings.
 
-## Installazione
+## Installation
 
-Supportato a partire da **Python 3.10**.
+Requires **Python 3.10 or later**.
 
 ```powershell
 python -m pip install .
 ```
 
-## Come eseguirlo
+## How to run
 
-### Ricerca personalizzata
+### Custom query
 
-Per leggere gli utenti e gli attributi indicati:
+To list users and the selected attributes:
 
 ```powershell
 adwsearch -H dc01.corp.local -u alice@corp.local -W -b "DC=corp,DC=local" "(sAMAccountType=805306368)" sAMAccountName memberOf
 ```
 
-- `-H`: nome del domain controller.
-- `-u`: account; puoi anche usare `-u alice -d corp.local`.
-- `-b`: base di ricerca, obbligatoria per le operazioni online.
-- Il filtro tra virgolette sceglie gli oggetti; i nomi successivi scelgono gli attributi.
+- `-H`: domain-controller hostname.
+- `-u`: account; you can also use `-u alice -d corp.local`.
+- `-b`: search base, required for online operations.
+- The quoted filter selects objects; the following names select attributes.
 
-Senza filtro e attributi vengono cercati tutti gli oggetti sotto la base indicata e letti gli attributi disponibili. L'output predefinito è LDIF, un formato testuale per dati di directory.
+Without a filter or attributes, the tool searches for all objects below the specified base and reads the available attributes. The default output is LDIF, a text format for directory data.
 
-Se il nome del controller non viene risolto, aggiungi `--dc-ip 10.10.1.10`, mantenendo il nome corretto in `-H`.
+If the controller hostname does not resolve, add `--dc-ip 10.10.1.10` while keeping the correct hostname in `-H`.
 
-### Controlli pronti e salvataggio dei risultati
+### Built-in checks and saving results
 
-Per cercare account senza preautenticazione Kerberos:
+To find accounts without Kerberos preauthentication:
 
 ```powershell
 adwsearch -H dc01.corp.local -u alice@corp.local -W -b "DC=corp,DC=local" --preset asrep
 ```
 
-Per salvare in JSON:
+To save results as JSON:
 
 ```powershell
 adwsearch -H dc01.corp.local -u alice@corp.local -W -b "DC=corp,DC=local" --preset spn -o json --outfile spns.json
 ```
 
-### Autenticazione Kerberos
+### Kerberos authentication
 
-Occorre una cache già valida e coerente con l'account e il dominio. ADWSearch non acquisisce automaticamente un TGT dalla password.
+You need an existing valid cache matching the account and domain. ADWSearch does not automatically obtain a TGT from a password.
 
 ```powershell
-$env:KRB5CCNAME = "C:\Percorso\alice.ccache"
+$env:KRB5CCNAME = "C:\Path\alice.ccache"
 adwsearch -H dc01.corp.local -u alice@corp.local -k -b "DC=corp,DC=local" --preset spn
 ```
 
-Con `-k`, l'opzione `--kerberos-enctype` seleziona la policy:
+With `-k`, `--kerberos-enctype` selects the policy:
 
-- `aes`: predefinita; usa AES senza fallback a RC4.
-- `rc4`: richiede esplicitamente RC4 per compatibilità legacy.
-- `auto`: prova AES e ripiega su RC4 solo se il KDC segnala algoritmi non supportati, non per errori di autenticazione, timeout o integrità.
+- `aes`: the default; uses AES without falling back to RC4.
+- `rc4`: explicitly requests RC4 for legacy compatibility.
+- `auto`: tries AES and falls back to RC4 only when the KDC reports unsupported encryption types, not on authentication, timeout, or integrity errors.
 
-Preferisci AES: RC4 conserva limiti di sicurezza propri del protocollo legacy. Nessuna policy del controller viene modificata. Per NTLM è disponibile anche `--hashes ":HASH_NT"` al posto di `-W`.
+Prefer AES: RC4 retains the security limitations of the legacy protocol. No controller policy is changed. For NTLM, you can also use `--hashes ":NT_HASH"` instead of `-W`.
 
-### Esportazione del dominio e di AD CS
+### Domain and AD CS exports
 
-Prima crea la cache:
+First, build the cache:
 
 ```powershell
 adwsearch -H dc01.corp.local -u alice@corp.local -W -b "DC=corp,DC=local" --dump buildcache --cachefile corp-cache.json
 ```
 
-Poi scegli l'esportazione desiderata, usando la stessa cache del dominio:
+Then choose the export you need, using the cache for the same domain:
 
 ```powershell
-# Oggetti e relazioni per BloodHound
+# Objects and relationships for BloodHound
 adwsearch -H dc01.corp.local -u alice@corp.local -W -b "DC=corp,DC=local" --dump bhdump --cachefile corp-cache.json --outdir bh-out
 
-# Configurazione di AD CS e possibili criticità
+# AD CS configuration and potential findings
 adwsearch -H dc01.corp.local -u alice@corp.local -W -b "DC=corp,DC=local" --dump certdump --cachefile corp-cache.json --outdir adcs-out
 
-# Statistiche locali, senza connessione al dominio
+# Local statistics, without a domain connection
 adwsearch --dump showstats --cachefile corp-cache.json
 ```
 
-## Sviluppo e test
+## Development and tests
 
-Dalla cartella del progetto, con l'ambiente virtuale attivo:
+From the project directory, with the virtual environment active:
 
 ```powershell
 python -m pip install -e ".[dev]"
@@ -118,9 +118,9 @@ python -m pytest -m "not lab"
 python -m ruff check adwsearch tests
 ```
 
-I test offline usano dati fittizi, incluse password e chiavi fittizie: non sono credenziali operative. I test di integrazione sono facoltativi e richiedono un ambiente autorizzato configurato esplicitamente; consulta [tests/lab/README.md](tests/lab/README.md).
+Offline tests use fake data, including fake passwords and keys; these are not operational credentials. Integration tests are optional and require an explicitly configured, authorized environment; see [tests/lab/README.md](tests/lab/README.md).
 
-## Licenza e crediti
+## License and credits
 
-ADWSearch è sviluppato da [Hexboi](https://github.com/Hexboi) e il codice originale è distribuito sotto [MPL-2.0](LICENSE), anche per uso professionale e commerciale.
-Crediti e licenze delle parti di terze parti sono raccolti in [NOTICE](NOTICE).
+ADWSearch is developed by [Hexboi](https://github.com/Hexboi), and its original code is available under [MPL-2.0](LICENSE), including for professional and commercial use.
+Third-party credits and license texts are collected in [NOTICE](NOTICE).
