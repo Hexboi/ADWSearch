@@ -11,9 +11,11 @@ from adwsearch import cli
 from adwsearch.dump import Cache
 from adwsearch.dump.labels import Label
 from adwsearch.transport.connection import AdwsConnection
+from adwsearch.soap.parser import AdObject
 
 
-def test_cli_dump_buildcache_invokes_build_and_serialize(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize('explicit_base', [True, False])
+def test_cli_dump_buildcache_invokes_build_and_serialize(monkeypatch, tmp_path, capsys, explicit_base):
     called = {}
 
     def fake_build_cache(client, base):
@@ -28,19 +30,25 @@ def test_cli_dump_buildcache_invokes_build_and_serialize(monkeypatch, tmp_path, 
 
     conn = MagicMock(spec=AdwsConnection)
     monkeypatch.setattr(cli, "connect_adws", lambda *a, **kw: conn)
-    monkeypatch.setattr(cli, "AdwsClient", MagicMock())
+    client = MagicMock()
+    client.get_rootdse.return_value = AdObject('top', {'defaultNamingContext': ['DC=corp,DC=local']})
+    monkeypatch.setattr(cli, "AdwsClient", MagicMock(return_value=client))
 
     cache_path = tmp_path / "cache.json"
-    rc = cli.main([
-        "-H", "dc01", "-u", "alice", "-w", "pw", "-b", "DC=corp,DC=local",
+    argv = [
+        "-H", "dc01", "-u", "alice", "-w", "pw",
         "--dump", "buildcache", "--cachefile", str(cache_path),
-    ])
+    ]
+    if explicit_base:
+        argv += ['-b', 'DC=corp,DC=local']
+    rc = cli.main(argv)
     assert rc == 0
     assert called["base"] == "DC=corp,DC=local"
     assert cache_path.exists()
     out = capsys.readouterr().out
     assert "cache written" in out
     assert "1 objects" in out
+    assert client.get_rootdse.call_count == (0 if explicit_base else 1)
 
 
 def test_cli_dump_showstats_works_offline_without_auth(monkeypatch, tmp_path, capsys):

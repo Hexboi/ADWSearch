@@ -87,6 +87,16 @@ def test_empty_string_value_is_preserved():
     assert result.items[0].attributes["description"] == [""]
 
 
+def test_attribute_whitespace_is_preserved_in_pull_and_get():
+    texts = [' leading and trailing ', '   ', '\r\ntext\t\r\n']
+    item = el('addata', 'user', children=[
+        el('addata', 'description', children=[value(text) for text in texts])])
+    pulled = parser.parse_pull_response(pull_response(' CTX ', [item])).items[0]
+    transferred = parser.parse_get_response(_get_response(item))
+    assert pulled.attributes['description'] == texts
+    assert transferred.attributes['description'] == texts
+
+
 def test_parses_from_encoded_bytes():
     # end to end: encode the response, decode it, then parse
     resp = pull_response("CTX", items=[

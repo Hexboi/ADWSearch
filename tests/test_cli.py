@@ -36,7 +36,18 @@ def patched_backend(monkeypatch):
             captured["client_args"] = (transport, host, port)
             captured["resource_factory"] = kwargs["resource_transport_factory"]
 
+        def get_rootdse(self):
+            captured['discovery_calls'] = captured.get('discovery_calls', 0) + 1
+            if captured.get('discovery_error'):
+                raise captured['discovery_error']
+            return AdObject('top', captured.get('contexts', {
+                'defaultNamingContext': ['DC=server,DC=test'],
+                'configurationNamingContext': ['CN=Configuration,DC=root,DC=test'],
+                'schemaNamingContext': ['CN=Schema,CN=Configuration,DC=root,DC=test'],
+            }))
+
         def search(self, base, scope, ldap_filter, attributes, size_limit, page_size):
+            captured.setdefault('search_bases', []).append(base)
             captured["search_kwargs"] = dict(
                 base=base, scope=scope, ldap_filter=ldap_filter,
                 attributes=attributes, size_limit=size_limit, page_size=page_size,
@@ -84,11 +95,83 @@ def test_missing_auth_errors(capsys):
     assert "auth" in capsys.readouterr().err.lower()
 
 
-def test_missing_base_errors(capsys):
-    with pytest.raises(SystemExit) as excinfo:
-        cli.main(["-H", "dc01", "-u", "alice", "-w", "pw"])
-    assert excinfo.value.code != 0
-    assert "base" in capsys.readouterr().err.lower()
+def test_missing_base_uses_dc_domain_not_account_domain(patched_backend):
+    assert cli.main(['-H', 'dc01', '-u', 'alice', '-d', 'OTHER', '-w', 'pw']) == 0
+    assert patched_backend['discovery_calls'] == 1
+    assert patched_backend['search_kwargs']['base'] == 'DC=server,DC=test'
+    assert patched_backend['connect_args']['security'].credentials.domain == 'OTHER'
+
+
+def test_explicit_base_skips_discovery(patched_backend):
+    assert cli.main(['-H', 'dc01', '-u', 'alice', '-w', 'pw',
+                     '-b', 'OU=People,DC=custom,DC=test']) == 0
+    assert 'discovery_calls' not in patched_backend
+    assert patched_backend['search_kwargs']['base'] == 'OU=People,DC=custom,DC=test'
+
+
+@pytest.mark.parametrize('partition,expected', [
+    ('config', ['CN=Configuration,DC=root,DC=test']),
+    ('schema', ['CN=Schema,CN=Configuration,DC=root,DC=test']),
+    ('all', ['DC=server,DC=test', 'CN=Configuration,DC=root,DC=test',
+             'CN=Schema,CN=Configuration,DC=root,DC=test']),
+])
+def test_writable_automatic_partitions_use_rootdse(patched_backend, partition, expected):
+    assert cli.main(['-H', 'dc01', '-u', 'a', '-w', 'pw', '--preset', 'writable',
+                     '--writable-partition', partition]) == 0
+    assert patched_backend['search_bases'] == expected
+
+
+def test_writable_missing_partition_does_not_guess_a_dn(patched_backend, capsys):
+    patched_backend['contexts'] = {'defaultNamingContext': ['DC=child,DC=test']}
+    assert cli.main(['-H', 'dc01', '-u', 'a', '-w', 'pw', '--preset', 'writable',
+                     '--writable-partition', 'config']) == 1
+    assert 'search_kwargs' not in patched_backend
+    assert '-b' in capsys.readouterr().err
+
+
+def test_discovery_attribute_names_are_case_insensitive(patched_backend):
+    patched_backend['contexts'] = {'DEFAULTNAMINGCONTEXT': ['DC=actual,DC=test']}
+    assert cli.main(['-H', 'dc01', '-u', 'a', '-w', 'pw']) == 0
+    assert patched_backend['search_kwargs']['base'] == 'DC=actual,DC=test'
+
+
+@pytest.mark.parametrize('contexts', [{}, {'defaultNamingContext': []},
+    {'defaultNamingContext': ['']}, {'defaultNamingContext': [1]},
+    {'defaultNamingContext': ['DC=a', 'DC=b']}])
+def test_missing_or_invalid_discovered_base_fails_before_query(patched_backend, contexts, capsys):
+    patched_backend['contexts'] = contexts
+    assert cli.main(['-H', 'dc01', '-u', 'a', '-w', 'pw']) == 1
+    assert '-b' in capsys.readouterr().err
+    assert 'search_kwargs' not in patched_backend
+    patched_backend['connection'].close.assert_called_once()
+
+
+def test_discovery_error_keeps_existing_outfile(patched_backend, tmp_path, capsys):
+    patched_backend['discovery_error'] = TimeoutError()
+    destination = tmp_path / 'keep.txt'
+    destination.write_text('keep', encoding='utf-8')
+    assert cli.main(['-H', 'dc01', '-u', 'a', '-w', 'pw', '--outfile', str(destination)]) == 1
+    assert destination.read_text(encoding='utf-8') == 'keep'
+    assert '-b' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('preset', [None, 'users-description', 'writable', 'dns-dump'])
+def test_dry_run_without_base_is_offline(monkeypatch, capsys, preset):
+    def forbidden(*args, **kwargs):
+        pytest.fail('dry-run must not connect')
+    monkeypatch.setattr(cli, 'connect_adws', forbidden)
+    argv = ['-H', 'dc01', '-u', 'a', '-d', 'CORP', '-w', 'pw', '--dry-run']
+    if preset:
+        argv += ['--preset', preset]
+    if preset == 'writable':
+        argv += ['--writable-partition', 'all']
+    assert cli.main(argv) == 0
+    output = capsys.readouterr().out
+    assert 'auto: defaultNamingContext' in output
+    assert 'None' not in output
+    if preset == 'writable':
+        assert 'auto: configurationNamingContext' in output
+        assert 'auto: schemaNamingContext' in output
 
 
 # --- dry run ---------------------------------------------------------------

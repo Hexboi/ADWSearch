@@ -11,6 +11,8 @@ format-specific bits (LDIF ``::`` marker for binary, JSON entry shape).
 import io
 import json
 
+import pytest
+
 from adwsearch.output.writers import write_json, write_ldif
 from adwsearch.soap.parser import AdObject
 
@@ -167,3 +169,55 @@ def test_json_handles_empty_iterable():
     buf = io.StringIO()
     write_json([], buf)
     assert json.loads(buf.getvalue()) == []
+
+
+def _users_table(entries, *, raw=False):
+    from adwsearch.output.writers import write_users_description
+    buf = io.StringIO()
+    write_users_description(entries, buf, raw=raw)
+    return buf.getvalue()
+
+
+def test_users_table_streams_one_row_per_object_without_truncation():
+    from adwsearch.output.writers import write_users_description
+    buf = io.StringIO()
+    long_text = 'Descrizione è ' + 'x' * 2000
+
+    def entries():
+        yield _entry('CN=a,DC=x', sAMAccountName=['alice'], description=[long_text, 'second'])
+        assert long_text in buf.getvalue()
+        yield _entry('CN=b,DC=x', sAMAccountName=['alice'])
+
+    write_users_description(entries(), buf)
+    lines = buf.getvalue().splitlines()
+    assert lines[0] == 'USER                     | DESCRIPTIONS'
+    assert len(lines) == 4
+    assert lines[2] == f"{'alice':24} | {long_text} ; second"
+    assert lines[3].endswith(' | [not returned]')
+
+
+@pytest.mark.parametrize('values,expected', [
+    ([], '[not returned]'), ([''], '""'), (['   '], '"   "'),
+    (['one', 'two'], 'one ; two'),
+])
+def test_users_table_description_states(values, expected):
+    text = _users_table([_entry('CN=a,DC=x', sAMAccountName=['a'], description=values)])
+    assert text.splitlines()[2].endswith(' | ' + expected)
+
+
+def test_users_table_fallbacks_and_empty_results():
+    assert len(_users_table([]).splitlines()) == 2
+    entries = [_entry('CN=a,DC=x'), AdObject('user', {})]
+    lines = _users_table(entries).splitlines()
+    assert lines[2].startswith('CN=a,DC=x')
+    assert lines[3].startswith('[unknown user]')
+
+
+@pytest.mark.parametrize('raw', [False, True])
+def test_users_table_escapes_controls_and_delimiters_in_both_columns(raw):
+    value = 'a\\|;\r\n\t\x00\x1b\x85\u2028\u2029\u202eé'
+    escaped = r'a\\\|\;\r\n\t\u0000\u001b\u0085\u2028\u2029\u202eé'
+    text = _users_table([_entry('CN=a,DC=x', sAMAccountName=[value], description=[value])], raw=raw)
+    assert len(text.splitlines()) == 3
+    assert text.splitlines()[2] == f'{escaped:24} | {escaped}'
+    assert '\x1b' not in text

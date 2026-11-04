@@ -72,7 +72,9 @@ def test_defaults():
     assert args.scope == "sub"
     assert args.filter == "(objectClass=*)"
     assert args.attributes == []
-    assert args.output == "ldif"
+    # The CLI resolves the omitted format after it knows the selected preset.
+    assert args.output is None
+    assert build_parser().parse_args(['-o', 'ldif']).output == 'ldif'
 
 
 def test_positional_filter_and_attributes():

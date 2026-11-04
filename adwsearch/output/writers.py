@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 # Copyright (c) 2026 Hexboi (https://github.com/Hexboi)
 
-"""Streaming LDIF and JSON writers.
+"""Streaming LDIF, JSON and user-description table writers.
 
 Both walk an iterable of :class:`~adwsearch.soap.parser.AdObject`, apply
 :func:`~adwsearch.attributes.decode.decode_attributes` (unless ``raw=True``) and stream
@@ -18,6 +18,7 @@ attribute value cannot inject fake ``dn:`` / attribute lines into the LDIF outpu
 
 import base64
 import json
+import unicodedata
 
 from adwsearch.attributes.decode import Base64Value, decode_attributes
 
@@ -95,3 +96,30 @@ def write_json(entries, stream, *, raw: bool = False) -> None:
         first = False
     stream.write("\n]" if not first else "]")
     stream.write("\n")
+
+
+def _table_escape(value: str) -> str:
+    escaped = []
+    for char in value:
+        if char in "\\|;":
+            escaped.append("\\" + char)
+        elif unicodedata.category(char)[0] == "C" or char in "\u2028\u2029":
+            escaped.append(json.dumps(char, ensure_ascii=True)[1:-1])
+        else:
+            escaped.append(char)
+    return "".join(escaped)
+
+
+def write_users_description(entries, stream, *, raw: bool = False) -> None:
+    stream.write(f"{'USER':24} | DESCRIPTIONS\n")
+    stream.write("-" * 25 + "+" + "-" * 57 + "\n")
+    for entry in entries:
+        decoded = decode_attributes(entry.attributes, raw=raw)
+        names = decoded.get("sAMAccountName") or []
+        user = (names[0] if names else None) or _extract_dn(decoded) or "[unknown user]"
+        descriptions = []
+        for value in decoded.get("description") or []:
+            text = _table_escape(value)
+            descriptions.append(f'"{text}"' if not value or value.isspace() else text)
+        text = " ; ".join(descriptions) if descriptions else "[not returned]"
+        stream.write(f"{_table_escape(user):24} | {text}\n")

@@ -17,6 +17,42 @@ from tests.lab.reference import LdapReference, ldap_query, assert_same_dns
 pytestmark = pytest.mark.lab
 
 
+def test_rootdse_discovery_matches_configured_domain(lab_client, lab_settings):
+    entry = lab_client.get_rootdse()
+    assert entry is not None
+    assert entry.attributes['defaultNamingContext'][0].casefold() == lab_settings.base.casefold()
+    assert entry.attributes['configurationNamingContext']
+    assert entry.attributes['schemaNamingContext']
+
+
+@pytest.mark.parametrize('preset', [None, *sorted(PRESETS)])
+def test_cli_automatic_base_matches_explicit_base(lab_settings, monkeypatch, tmp_path, preset):
+    import json
+    from adwsearch import cli
+
+    s = lab_settings
+    monkeypatch.setattr(cli.getpass, 'getpass', lambda prompt: s.password)
+    argv = ['-H', s.host, '--dc-ip', s.ip, '-u', s.user, '-d', s.domain,
+            '-W', '-o', 'json', '--page-size', '2']
+    if preset:
+        argv += ['--preset', preset]
+    else:
+        argv += ['-s', 'base', '(objectClass=*)', 'distinguishedName']
+    outputs = []
+    for explicit in (False, True):
+        path = tmp_path / f'{explicit}.json'
+        args = [*argv, '--outfile', str(path)]
+        if explicit:
+            args += ['-b', s.base]
+        assert cli.main(args) == 0
+        entries = json.loads(path.read_text(encoding='utf-8'))
+        outputs.append(sorted(json.dumps({
+            'dn': entry['dn'], 'object_class': entry['object_class'],
+            'attributes': {name: sorted(values) for name, values in entry['attributes'].items()},
+        }, sort_keys=True) for entry in entries))
+    assert outputs[0] == outputs[1]
+
+
 def test_domain_base_query_matches_signed_ldap(lab_client, lab_settings):
     entries = list(lab_client.search(lab_settings.base, scope="base",
                                      attributes=["distinguishedName"], page_size=1))
@@ -58,6 +94,76 @@ def test_enumeration_presets(lab_client, lab_settings, preset):
     assert normalized(entries) == normalized(reference)
     if preset in ("forest-level", "maq"):
         assert len(entries) == 1
+
+
+@pytest.mark.parametrize('page_size', [2, 256])
+def test_users_description_values_and_limit_match_ldap(lab_client, lab_settings, page_size):
+    attrs = ['distinguishedName', 'sAMAccountName', 'description']
+    reference = ldap_query(lab_settings.base, '(sAMAccountType=805306368)',
+                           attributes=attrs, page_size=page_size)
+
+    def normalized(entries):
+        result = {}
+        for entry in entries:
+            fields = {k.casefold(): v for k, v in entry.attributes.items()}
+            dn = fields['distinguishedname'][0].casefold()
+            assert dn not in result, 'duplicate user DN'
+            result[dn] = {k: sorted(str(v) for v in fields[k])
+                          for k in ('samaccountname', 'description') if k in fields}
+        return result
+
+    args = SimpleNamespace(base=lab_settings.base, sizelimit=0, page_size=page_size)
+    actual = list(PRESETS['users-description'].run(lab_client, args))
+    expected = normalized(reference)
+    assert normalized(actual) == expected
+    args.sizelimit = 3
+    limited = list(PRESETS['users-description'].run(lab_client, args))
+    assert len(limited) == min(3, len(expected))
+    assert normalized(limited).items() <= expected.items()
+
+
+@pytest.mark.parametrize('fmt', ['table', 'json', 'ldif'])
+def test_users_description_cli_exports(lab_settings, monkeypatch, tmp_path, fmt):
+    import io
+    import json
+    from adwsearch import cli
+    from adwsearch.output.writers import write_ldif, write_users_description
+
+    s = lab_settings
+    reference = ldap_query(s.base, '(sAMAccountType=805306368)',
+                           attributes=['distinguishedName', 'sAMAccountName', 'description'])
+    monkeypatch.setattr(cli.getpass, 'getpass', lambda prompt: s.password)
+    destination = tmp_path / ('users.' + fmt)
+    argv = ['-H', s.host, '--dc-ip', s.ip, '-u', s.user, '-d', s.domain,
+            '-W', '-b', s.base, '--preset', 'users-description',
+            '--page-size', '2', '--outfile', str(destination)]
+    if fmt != 'table':
+        argv += ['-o', fmt]
+    assert cli.main(argv) == 0
+    text = destination.read_text(encoding='utf-8')
+    if fmt == 'json':
+        actual = json.loads(text)
+        assert len(actual) == len(reference)
+        by_dn = {entry['dn'].casefold(): entry['attributes'] for entry in actual}
+        assert len(by_dn) == len(actual)
+        for entry in reference:
+            fields = by_dn[entry.attributes['distinguishedName'][0].casefold()]
+            for name in ('sAMAccountName', 'description'):
+                assert fields.get(name) == entry.attributes.get(name)
+    else:
+        expected = io.StringIO()
+        writer = write_users_description if fmt == 'table' else write_ldif
+        writer(reference, expected)
+        if fmt == 'table':
+            assert len(text.splitlines()) == len(reference) + 2
+            assert sorted(text.splitlines()) == sorted(expected.getvalue().splitlines())
+        else:
+            def records(payload):
+                return sorted(tuple(sorted(
+                    line for line in block.splitlines()
+                    if line.split(':', 1)[0] != 'objectReferenceProperty'
+                )) for block in payload.strip().split('\n\n') if block)
+            assert records(text) == records(expected.getvalue())
 
 
 def test_pass_the_hash_matches_password(lab_settings, lab_client):

@@ -120,7 +120,7 @@ def _parse_item(node: Node) -> AdObject:
         # An `<ad:value/>` self-closed element carries no Text record: preserve
         # it as "" rather than silently dropping the value (AD stores real
         # empty-string attributes; skipping them would understate the answer).
-        values = [_clean(v.text) if v.text is not None else ""
+        values = [v.text if v.text is not None else ""
                   for v in attr_node.children if v.name == "value"]
         attributes[attr_node.name] = values
     return AdObject(object_class=node.name, attributes=attributes)

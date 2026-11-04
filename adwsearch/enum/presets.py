@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 # Copyright (c) 2026 Hexboi (https://github.com/Hexboi)
 
-"""The 6 read-only enumeration presets.
+"""Read-only enumeration presets.
 
 Each preset is a small recipe on top of ``AdwsClient.search`` — same SOAP
 WS-Enumeration path (ADWS on TCP 9389). No LDAP protocol / no ldap3.
@@ -141,6 +141,25 @@ def _asrep_resolve(args) -> dict:
             "filter": _ASREP_FILTER, "attributes": _ASREP_ATTRS}
 
 
+# --- users-description ----------------------------------------------------
+
+_USERS_DESCRIPTION_FILTER = "(sAMAccountType=805306368)"
+_USERS_DESCRIPTION_ATTRS = ["distinguishedName", "sAMAccountName", "description"]
+
+
+def _users_description_run(client, args) -> Iterator[AdObject]:
+    yield from client.search(
+        base=args.base, scope="sub", ldap_filter=_USERS_DESCRIPTION_FILTER,
+        attributes=_USERS_DESCRIPTION_ATTRS,
+        size_limit=args.sizelimit, page_size=args.page_size,
+    )
+
+
+def _users_description_resolve(args) -> dict:
+    return {"base": args.base, "scope": "sub",
+            "filter": _USERS_DESCRIPTION_FILTER, "attributes": _USERS_DESCRIPTION_ATTRS}
+
+
 # --- spn ------------------------------------------------------------------
 
 _SPN_FILTER_ANY = "(servicePrincipalName=*)"
@@ -226,17 +245,15 @@ _WRITABLE_OTYPE_FILTERS = {
 
 def _writable_bases(args) -> list[str]:
     partition = args.writable_partition
+    config = getattr(args, "configuration_base", None) or f"CN=Configuration,{args.base}"
+    schema = getattr(args, "schema_base", None) or f"CN=Schema,CN=Configuration,{args.base}"
     if partition == "domain":
         return [args.base]
     if partition == "config":
-        return [f"CN=Configuration,{args.base}"]
+        return [config]
     if partition == "schema":
-        return [f"CN=Schema,CN=Configuration,{args.base}"]
-    return [
-        args.base,
-        f"CN=Configuration,{args.base}",
-        f"CN=Schema,CN=Configuration,{args.base}",
-    ]
+        return [schema]
+    return [args.base, config, schema]
 
 
 def _writable_run(client, args) -> Iterator[AdObject]:
@@ -385,6 +402,12 @@ def _dns_dump_resolve(args) -> dict:
 # --- registry -------------------------------------------------------------
 
 PRESETS: dict[str, Preset] = {
+    "users-description": Preset(
+        name="users-description",
+        description="List user accounts and descriptions (default output: table).",
+        run=_users_description_run,
+        resolve=_users_description_resolve,
+    ),
     "forest-level": Preset(
         name="forest-level",
         description="Read msDS-Behavior-Version on the domain NC root.",

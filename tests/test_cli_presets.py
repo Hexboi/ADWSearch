@@ -38,6 +38,7 @@ def patched_backend(monkeypatch):
                 return
             yield _fake_entry("CN=svc-sql,OU=Services,DC=corp,DC=local",
                               sAMAccountName=["svc-sql"],
+                              description=["SQL service", "Owner: Alice"],
                               servicePrincipalName=["MSSQLSvc/db1.corp.local:1433"])
 
         def get(self, dn):
@@ -57,6 +58,76 @@ def patched_backend(monkeypatch):
 
 
 # --- validation -----------------------------------------------------------
+
+
+@pytest.mark.parametrize('fmt', [None, 'table', 'json', 'ldif'])
+def test_users_description_output_formats(patched_backend, capsys, fmt):
+    import json
+    argv = ['-H', 'dc01', '-u', 'alice', '-w', 'pw', '-b', 'DC=x',
+            '--preset', 'users-description']
+    if fmt:
+        argv += ['-o', fmt]
+    assert cli.main(argv) == 0
+    text = capsys.readouterr().out
+    if fmt == 'json':
+        entry = json.loads(text)[0]
+        assert entry['attributes']['description'] == ['SQL service', 'Owner: Alice']
+        assert entry['dn'] == 'CN=svc-sql,OU=Services,DC=corp,DC=local'
+    elif fmt == 'ldif':
+        assert 'dn: CN=svc-sql,' in text
+        assert 'description: SQL service' in text
+    else:
+        assert len(text.splitlines()) == 3
+        assert text.startswith('USER')
+        assert 'SQL service ; Owner: Alice' in text
+
+
+@pytest.mark.parametrize('selection', [[], ['--preset', 'spn'], ['--dump', 'showstats']])
+def test_table_rejected_elsewhere_before_password_prompt(monkeypatch, selection, capsys):
+    def forbidden(*args, **kwargs):
+        pytest.fail('invalid table invocation must not prompt or connect')
+    monkeypatch.setattr(cli.getpass, 'getpass', forbidden)
+    monkeypatch.setattr(cli, 'connect_adws', forbidden)
+    with pytest.raises(SystemExit) as error:
+        cli.main(['-H', 'dc01', '-u', 'alice', '-W', '-b', 'DC=x', '-o', 'table', *selection])
+    assert error.value.code == 2
+    assert '--preset users-description' in capsys.readouterr().err
+
+
+def test_users_description_dry_run_resolves_table_without_connecting(monkeypatch, capsys):
+    def forbidden(*args, **kwargs):
+        pytest.fail('dry-run must not connect')
+    monkeypatch.setattr(cli, 'connect_adws', forbidden)
+    assert cli.main(['-H', 'dc01', '-u', 'a', '-w', 'pw', '-b', 'DC=x',
+                     '--preset', 'users-description', '--dry-run']) == 0
+    out = capsys.readouterr().out
+    assert 'output:  table' in out
+    assert '(sAMAccountType=805306368)' in out
+    assert 'distinguishedName sAMAccountName description' in out
+
+
+def test_users_description_raw_outfile_and_atomic_failure(patched_backend, tmp_path, monkeypatch):
+    destination = tmp_path / 'users.txt'
+    argv = ['-H', 'dc01', '-u', 'a', '-w', 'pw', '-b', 'DC=x',
+            '--preset', 'users-description', '--raw', '--outfile', str(destination)]
+    assert cli.main(argv) == 0
+    text = destination.read_text(encoding='utf-8')
+    assert 'SQL service ; Owner: Alice' in text
+
+    def failing_writer(entries, stream, *, raw=False):
+        stream.write('partial')
+        raise OSError('simulated failure')
+    monkeypatch.setattr(cli, 'write_users_description', failing_writer)
+    assert cli.main(argv) == 1
+    assert destination.read_text(encoding='utf-8') == text
+
+
+@pytest.mark.parametrize('extra', [['(cn=someone)'], ['--dump', 'buildcache']])
+def test_users_description_rejects_conflicting_query_options(capsys, extra):
+    with pytest.raises(SystemExit) as error:
+        cli.main(['-H', 'dc01', '-u', 'a', '-w', 'pw', '-b', 'DC=x',
+                  '--preset', 'users-description', *extra])
+    assert error.value.code == 2
 
 def test_preset_with_positional_filter_errors(capsys):
     with pytest.raises(SystemExit):

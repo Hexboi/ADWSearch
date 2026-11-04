@@ -116,6 +116,31 @@ def test_writable_zero_numeric_text_does_not_claim_writable():
     assert list(PRESETS['writable'].run(client, FakeArgs())) == []
 
 
+def test_users_description_query_preserves_users_without_description():
+    from unittest.mock import Mock
+    client = Mock()
+    entry = AdObject('user', {'sAMAccountName': ['alice']})
+    client.search.return_value = iter([entry])
+    args = FakeArgs(sizelimit=3, page_size=2)
+    preset = PRESETS['users-description']
+    assert list(preset.run(client, args)) == [entry]
+    expected = dict(base=args.base, scope='sub',
+                    filter='(sAMAccountType=805306368)',
+                    attributes=['distinguishedName', 'sAMAccountName', 'description'])
+    assert preset.resolve(args) == expected
+    client.search.assert_called_once_with(
+        base=args.base, scope='sub', ldap_filter=expected['filter'],
+        attributes=expected['attributes'], size_limit=3, page_size=2)
+
+
+def test_writable_uses_discovered_forest_partitions_for_child_domain():
+    from adwsearch.enum.presets import _writable_bases
+    args = FakeArgs(base='DC=child,DC=root,DC=test', writable_partition='all')
+    args.configuration_base = 'CN=Configuration,DC=root,DC=test'
+    args.schema_base = 'CN=Schema,CN=Configuration,DC=root,DC=test'
+    assert _writable_bases(args) == [args.base, args.configuration_base, args.schema_base]
+
+
 # --- forest-level ---------------------------------------------------------
 
 def test_forest_level_uses_wstransfer_get():

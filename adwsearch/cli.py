@@ -4,7 +4,7 @@
 """Command-line interface for ADWSearch.
 
 Wires argparse → :class:`Credentials` → NTLM/Kerberos SecurityContext → ``connect_adws``
-→ :class:`AdwsClient.search` → LDIF/JSON writer. SOCKS5 is enabled with ``--socks
+→ :class:`AdwsClient.search` → LDIF/JSON/table writer. SOCKS5 is enabled with ``--socks
 HOST:PORT`` (uses PySocks); ``--dry-run`` prints the summary of what would be sent without
 opening a socket.
 """
@@ -27,7 +27,8 @@ from adwsearch.auth.ntlm import NtlmSecurityContext
 from adwsearch.auth.kerberos_ticket import ccache_path, resolve_spn, validate_ccache
 from adwsearch.logging_config import configure_logging
 from adwsearch.enum import PRESETS
-from adwsearch.output.writers import write_json, write_ldif
+from adwsearch.output.writers import write_json, write_ldif, write_users_description
+from adwsearch.soap.parser import AdwsSoapFault
 
 DEFAULT_PORT = 9389
 DEFAULT_FILTER = "(objectClass=*)"
@@ -171,7 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     search = parser.add_argument_group("search")
     search.add_argument("-b", "--base", metavar="DN",
-                        help="search base DN (required for online operations)")
+                        help="search base DN (default: discover the DC's domain via ADWS RootDSE)")
     search.add_argument("-s", "--scope", choices=("base", "one", "sub"), default="sub",
                         metavar="SCOPE",
                         help="search scope: base|one|sub (default: sub)")
@@ -192,7 +193,7 @@ def build_parser() -> argparse.ArgumentParser:
     enum.add_argument("--preset", choices=sorted(PRESETS), metavar="NAME",
                       help="run a preset enumeration: forest-level | maq | "
                            "asrep | kerberoastable | writable | dns-dump | "
-                           "spn")
+                           "spn | users-description")
     enum.add_argument("--writable-otype", choices=("user", "group", "ou", "gpo", "any"),
                       default="any", metavar="TYPE",
                       help="--preset writable object type: user|group|ou|gpo|any "
@@ -233,9 +234,11 @@ def build_parser() -> argparse.ArgumentParser:
                            "catch-all (mitigates DC paging limits on large domains)")
 
     out = parser.add_argument_group("output")
-    out.add_argument("-o", "--output", choices=("ldif", "json"), default="ldif",
+    out.add_argument("-o", "--output", choices=("ldif", "json", "table"), default=None,
                      metavar="FMT",
-                     help="output format: ldif|json (default: ldif)")
+                     help="output format: ldif|json|table (default: table for "
+                          "users-description, ldif otherwise; table requires "
+                          "--preset users-description)")
     out.add_argument("--outfile", metavar="PATH",
                      help="write output to a file instead of stdout")
     out.add_argument("--raw", action="store_true",
@@ -302,6 +305,11 @@ def _build_socks5_factory(socks_arg: str, timeout: int):
 
 
 def _dry_run(args, connect_host: str, credentials: Credentials) -> None:
+    if args.base is None:
+        args = argparse.Namespace(**vars(args))
+        args.base = "(auto: defaultNamingContext)"
+        args.configuration_base = "(auto: configurationNamingContext)"
+        args.schema_base = "(auto: schemaNamingContext)"
     auth_kind = (
         f"Kerberos (ccache, {args.kerberos_enctype or 'aes'})" if args.kerberos
         else "NTLM pass-the-hash" if args.hashes
@@ -349,9 +357,31 @@ def _dry_run(args, connect_host: str, credentials: Credentials) -> None:
         print(line)
 
 
+def _discover_base(client, args) -> None:
+    entry = client.get_rootdse()
+    attributes = {name.casefold(): values for name, values in entry.attributes.items()} if entry else {}
+
+    def context(name):
+        values = attributes.get(name.casefold()) or []
+        if len(values) != 1 or not isinstance(values[0], str) or not values[0].strip():
+            raise ValueError(f"RootDSE did not return a valid {name}")
+        return values[0]
+
+    args.base = context("defaultNamingContext")
+    if args.preset == "writable":
+        if args.writable_partition in ("config", "all"):
+            args.configuration_base = context("configurationNamingContext")
+        if args.writable_partition in ("schema", "all"):
+            args.schema_base = context("schemaNamingContext")
+
+
 def _main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.output is None:
+        args.output = "table" if args.preset == "users-description" else "ldif"
+    if args.output == "table" and (args.preset != "users-description" or args.dump):
+        parser.error("-o table requires --preset users-description and cannot be used with --dump")
     configure_logging(args.verbose)
     if args.dump and (args.preset or args.filter != DEFAULT_FILTER or args.attributes):
         parser.error("--dump is mutually exclusive with --preset and positional filter/attributes")
@@ -408,8 +438,8 @@ def _main(argv: list[str] | None = None) -> int:
     # --- validate -----------------------------------------------------------
     if not args.host and not args.dc_ip:
         parser.error("either -H/--host or --dc-ip is required")
-    if not args.base:
-        parser.error("-b/--base is required")
+    if args.base == "":
+        parser.error("-b/--base cannot be empty; omit it for automatic discovery")
     if not (args.kerberos or args.password or args.prompt_password or args.hashes):
         parser.error(
             "authentication required: -w PASSWORD | -W | --hashes LM:NT | -k")
@@ -489,6 +519,13 @@ def _main(argv: list[str] | None = None) -> int:
     try:
         client = AdwsClient(conn, target_host, args.port,
                             resource_transport_factory=resource_transport)
+        if args.base is None:
+            try:
+                _discover_base(client, args)
+            except (OSError, EOFError, ValueError, AdwsSoapFault) as exc:
+                print(f"error: ADWS base discovery failed ({type(exc).__name__}); "
+                      "specify -b/--base explicitly", file=sys.stderr)
+                return 1
         if args.dump == "buildcache":
             from adwsearch.dump import build_cache
             cache = build_cache(client, args.base)
@@ -528,7 +565,8 @@ def _main(argv: list[str] | None = None) -> int:
                 size_limit=args.sizelimit, page_size=args.page_size,
             )
 
-        writer = write_json if args.output == "json" else write_ldif
+        writer = {"json": write_json, "ldif": write_ldif,
+                  "table": write_users_description}[args.output]
         if args.outfile:
             from adwsearch.output.atomic import atomic_text_file
             with atomic_text_file(args.outfile) as stream:

@@ -24,6 +24,9 @@ _log = logging.getLogger(__name__)
 # Sentinel: WS-Transfer attempted and known-bad on this host (fall back to search).
 _GET_UNSUPPORTED = object()
 
+# MS-ADDM 2.3.1 reserves this object reference for RootDSE.
+_ROOT_DSE_GUID = "11111111-1111-1111-1111-111111111111"
+
 # SOAP fault subcodes that mean "this endpoint does not accept this action
 # at all" -- the only cases where silently retrying on the other resource
 # endpoint and ultimately falling back to search(scope=base) is correct.
@@ -75,6 +78,10 @@ class AdwsClient:
         self._resource_endpoint = None
         self._resource_transport_factory = resource_transport_factory
 
+    def get_rootdse(self):
+        """Read the server's naming contexts through the Resource endpoint."""
+        return self.get(_ROOT_DSE_GUID)
+
     def get(self, dn: str):
         """Read through a dedicated Resource connection; never reroute Enumeration."""
         if self._resource_transport_factory is None or self._resource_endpoint is _GET_UNSUPPORTED:
@@ -93,6 +100,8 @@ class AdwsClient:
 
     def _get_via_search(self, dn: str):
         """Fallback used by :meth:`get` when WS-Transfer is unavailable."""
+        if dn == _ROOT_DSE_GUID:
+            raise ValueError("RootDSE discovery requires the ADWS Resource endpoint")
         return next(iter(self.search(
             base=dn, scope="base", ldap_filter="(objectClass=*)",
             size_limit=0, page_size=1)), None)

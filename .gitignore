@@ -30,3 +30,4 @@ coverage.xml
 .smoke-venv/
 .tox/
 .nox/
+docs/
