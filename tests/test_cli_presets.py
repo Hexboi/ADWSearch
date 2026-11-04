@@ -32,6 +32,11 @@ def patched_backend(monkeypatch):
 
         def search(self, **kw):
             captured["search_kwargs_list"].append(kw)
+            if kw['ldap_filter'] == '(objectClass=domainDNS)':
+                yield AdObject('domainDNS', {'distinguishedName': [kw['base']],
+                    'minPwdLength': [12], 'maxPwdAge': [0], 'pwdProperties': ['17'],
+                    'forceLogoff': ['-9223372036854775808']})
+                return
             if "MicrosoftDNS" in kw["base"]:
                 yield AdObject("dnsZone", {"name": ["corp.local"],
                     "distinguishedName": ["DC=corp.local," + kw["base"]]})
@@ -58,6 +63,46 @@ def patched_backend(monkeypatch):
 
 
 # --- validation -----------------------------------------------------------
+
+
+@pytest.mark.parametrize('fmt', ['json', 'ldif'])
+@pytest.mark.parametrize('raw', [False, True])
+def test_password_policy_cli_formats_and_raw(patched_backend, capsys, fmt, raw):
+    import json
+    argv = ['-H', 'dc01', '-u', 'a', '-w', 'pw', '-b', 'DC=x',
+            '--preset', 'password-policy', '-o', fmt]
+    if raw:
+        argv += ['--raw']
+    assert cli.main(argv) == 0
+    text = capsys.readouterr().out
+    expected = '0' if raw else '0 (never expires)'
+    if fmt == 'json':
+        entry = json.loads(text)[0]
+        assert entry['dn'] == 'DC=x'
+        assert entry['attributes']['maxPwdAge'] == [expected]
+        assert entry['attributes']['forceLogoff'] == [
+            '-9223372036854775808' if raw else '-9223372036854775808 (forced logoff disabled)']
+    else:
+        assert 'dn: DC=x' in text
+        assert 'maxPwdAge: ' + expected + '\n' in text
+        assert ('forceLogoff: -9223372036854775808' +
+                ('' if raw else ' (forced logoff disabled)') + '\n') in text
+    assert ('DOMAIN_PASSWORD_COMPLEX' in text) is not raw
+
+
+def test_password_policy_dry_run_and_conflicts(monkeypatch, capsys):
+    def forbidden(*args, **kwargs):
+        pytest.fail('dry-run or invalid query must not connect')
+    monkeypatch.setattr(cli, 'connect_adws', forbidden)
+    argv = ['-H', 'dc01', '-u', 'a', '-w', 'pw', '--preset', 'password-policy']
+    assert cli.main([*argv, '--dry-run']) == 0
+    output = capsys.readouterr().out
+    assert '(auto: defaultNamingContext)' in output
+    assert '(objectClass=domainDNS)' in output
+    assert 'lockOutObservationWindow' in output
+    for extra in (['(cn=a)'], ['--dump', 'buildcache']):
+        with pytest.raises(SystemExit):
+            cli.main([*argv, *extra])
 
 
 @pytest.mark.parametrize('fmt', [None, 'table', 'json', 'ldif'])

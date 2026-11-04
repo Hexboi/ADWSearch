@@ -92,8 +92,68 @@ def test_enumeration_presets(lab_client, lab_settings, preset):
                                   for key, values in row.attributes.items()
                                   if key.casefold() not in ('objectreferenceproperty', 'distinguishedname'))) for row in rows)
     assert normalized(entries) == normalized(reference)
-    if preset in ("forest-level", "maq"):
+    if preset in ("forest-level", "maq", "password-policy"):
         assert len(entries) == 1
+
+
+def test_password_policy_raw_matches_independent_ldap(lab_client, lab_settings):
+    names = ['minPwdLength', 'pwdHistoryLength', 'minPwdAge', 'maxPwdAge',
+             'pwdProperties', 'lockoutThreshold', 'lockoutDuration', 'lockOutObservationWindow', 'forceLogoff']
+    reference = ldap_query(lab_settings.base, '(objectClass=domainDNS)', 'base',
+                           ['distinguishedName', *names])
+    args = SimpleNamespace(base=lab_settings.base, sizelimit=0, page_size=256, raw=True)
+    actual = list(PRESETS['password-policy'].run(lab_client, args))
+    assert len(actual) == len(reference) == 1
+
+    def normalized(entry):
+        return {name.casefold(): sorted(str(v) for v in values)
+                for name, values in entry.attributes.items()}
+    assert normalized(actual[0]) == normalized(reference[0])
+    assert all(name in actual[0].attributes for name in names)
+    args.raw = False
+    readable = list(PRESETS['password-policy'].run(lab_client, args))[0].attributes
+    assert readable['distinguishedName'] == [lab_settings.base]
+    for name in names:
+        assert str(readable[name][0]).startswith(str(actual[0].attributes[name][0]))
+    assert ('DOMAIN_PASSWORD_COMPLEX' in readable['pwdProperties'][0]) == bool(
+        int(actual[0].attributes['pwdProperties'][0]) & 1)
+
+
+@pytest.mark.parametrize('fmt', ['ldif', 'json'])
+@pytest.mark.parametrize('raw', [False, True])
+def test_password_policy_cli_exports(lab_settings, monkeypatch, tmp_path, fmt, raw):
+    import json
+    from adwsearch import cli
+
+    s = lab_settings
+    monkeypatch.setattr(cli.getpass, 'getpass', lambda prompt: s.password)
+    destination = tmp_path / ('policy.' + fmt)
+    argv = ['-H', s.host, '--dc-ip', s.ip, '-u', s.user, '-d', s.domain, '-W',
+            '--preset', 'password-policy', '-o', fmt, '--outfile', str(destination)]
+    if raw:
+        argv += ['--raw']
+    assert cli.main(argv) == 0
+    text = destination.read_text(encoding='utf-8')
+    if fmt == 'json':
+        payload = json.loads(text)
+        assert len(payload) == 1
+        assert payload[0]['dn'] == s.base
+        fields = payload[0]['attributes']
+    else:
+        fields = {line.split(': ', 1)[0]: [line.split(': ', 1)[1]]
+                  for line in text.splitlines() if ': ' in line}
+        assert fields['dn'] == [s.base]
+    names = ['minPwdLength', 'pwdHistoryLength', 'minPwdAge', 'maxPwdAge',
+             'pwdProperties', 'lockoutThreshold', 'lockoutDuration', 'lockOutObservationWindow', 'forceLogoff']
+    reference = ldap_query(s.base, '(objectClass=domainDNS)', 'base', names)[0]
+    for name in names:
+        expected = str(reference.attributes[name][0])
+        if raw:
+            assert fields[name] == [expected]
+        else:
+            assert fields[name][0].startswith(expected)
+    if not raw:
+        assert '(' in fields['maxPwdAge'][0]
 
 
 @pytest.mark.parametrize('page_size', [2, 256])

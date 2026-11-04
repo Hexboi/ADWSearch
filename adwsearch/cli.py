@@ -40,9 +40,9 @@ _EPILOG = f"""\
 examples:
   # Examples below use POSIX shell continuations; in PowerShell use one line.
   # Names and values are placeholders. -W prompts without exposing a password in argv.
-  # Basic search (LDIF output) - default filter (objectClass=*) if none given.
+  # Basic search (LDIF output), restricted to an explicit OU.
   adwsearch -H dc01.corp.local -u alice@corp.local -W \\
-      -b 'DC=corp,DC=local' '(objectClass=user)' sAMAccountName memberOf
+      -b 'OU=People,DC=corp,DC=local' '(sAMAccountType=805306368)' sAMAccountName memberOf
 
   # Pass-the-hash + JSON output to a file.
   adwsearch -H dc01.corp.local -u alice \\
@@ -57,38 +57,47 @@ examples:
   adwsearch -H dc01.corp.local --dc-ip 10.10.1.10 -u alice@corp.local -W \\
       --socks 127.0.0.1:1080 -b 'DC=corp,DC=local' '(objectClass=computer)'
 
-  # Enum preset: forest / domain functional level.
+  # Presets below discover the DC's domain automatically when -b is omitted.
+  # Enum preset: domain functional level (the historical name is forest-level).
   adwsearch -H dc01.corp.local -u alice@corp.local -W \\
-      -b 'DC=corp,DC=local' --preset forest-level
+      --preset forest-level
 
   # Enum preset: Machine Account Quota (RBCD precondition).
   adwsearch -H dc01.corp.local -u alice@corp.local -W \\
-      -b 'DC=corp,DC=local' --preset maq
+      --preset maq
+
+  # Enum preset: default domain password, lockout and forced-logoff policy.
+  adwsearch -H dc01.corp.local -u alice -d corp.local -W \\
+      --preset password-policy
+
+  # Enum preset: one user per table row, including accounts without descriptions.
+  adwsearch -H dc01.corp.local -u alice -d corp.local -W \\
+      --preset users-description
 
   # Enum preset: AS-REP-roastable accounts (DONT_REQ_PREAUTH bit).
   adwsearch -H dc01.corp.local -u alice@corp.local -W \\
-      -b 'DC=corp,DC=local' --preset asrep
+      --preset asrep
 
-  # Enum preset: writable objects, only users, scanning every NC partition.
+  # Enum preset: writable users across domain, Configuration and Schema partitions.
   adwsearch -H dc01.corp.local -u alice@corp.local -W \\
-      -b 'DC=corp,DC=local' --preset writable \\
+      --preset writable \\
       --writable-otype user --writable-partition all
 
   # Enum preset: full DNS dump including AD-internal glue records.
   adwsearch -H dc01.corp.local -u alice@corp.local -W \\
-      -b 'DC=corp,DC=local' --preset dns-dump --dns-include-glue -o json
+      --preset dns-dump --dns-include-glue -o json
 
   # Enum preset: every SPN-bearing object (users, computers, gMSA, trusts).
   adwsearch -H dc01.corp.local -u alice@corp.local -W \\
-      -b 'DC=corp,DC=local' --preset spn -o json --outfile spns.json
+      --preset spn -o json --outfile spns.json
 
   # Enum preset: find every registered SQL Server instance in the domain.
   adwsearch -H dc01.corp.local -u alice@corp.local -W \\
-      -b 'DC=corp,DC=local' --preset spn --spn-class MSSQLSvc
+      --preset spn --spn-class MSSQLSvc
 
 {fill(PRESETS['kerberoastable'].description, width=96, initial_indent='  # ', subsequent_indent='  # ')}
   adwsearch -H dc01.corp.local -u alice@corp.local -W \\
-      -b 'DC=corp,DC=local' --preset kerberoastable -o json
+      --preset kerberoastable -o json
 
   # Dump: build SID/GUID <-> DN cache (foundation for BH dump).
   adwsearch -H dc01.corp.local -u alice@corp.local -W \\
@@ -107,9 +116,9 @@ examples:
       -b 'DC=corp,DC=local' --sleep 1 --jitter 2 \\
       --dump bhdump --cachefile corp-cache.json --outdir bh-out
 
-  # Dry-run - see the resolved SOAP query without connecting to the DC.
+  # Dry-run - preview the query without connecting; an automatic base stays unresolved.
   adwsearch -H dc01.corp.local -u alice@corp.local -W \\
-      -b 'DC=corp,DC=local' --preset kerberoastable --dry-run
+      --preset password-policy --dry-run
 """
 
 
@@ -187,13 +196,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     enum = parser.add_argument_group(
         "enum",
-        "Preset enumeration recipes. Each --preset overrides the positional "
-        "filter/attrs with a fixed ADWS query.",
+        "Preset enumeration recipes. Each --preset defines its own ADWS query "
+        "and cannot be combined with positional filter/attributes.",
     )
     enum.add_argument("--preset", choices=sorted(PRESETS), metavar="NAME",
-                      help="run a preset enumeration: forest-level | maq | "
-                           "asrep | kerberoastable | writable | dns-dump | "
-                           "spn | users-description")
+                      help="run a preset enumeration: " + " | ".join(sorted(PRESETS)))
     enum.add_argument("--writable-otype", choices=("user", "group", "ou", "gpo", "any"),
                       default="any", metavar="TYPE",
                       help="--preset writable object type: user|group|ou|gpo|any "
@@ -242,9 +249,9 @@ def build_parser() -> argparse.ArgumentParser:
     out.add_argument("--outfile", metavar="PATH",
                      help="write output to a file instead of stdout")
     out.add_argument("--raw", action="store_true",
-                     help="do not decode binary attributes (SID/GUID/...): emit base64")
+                     help="show raw values without decoding or policy annotations (binary as base64)")
     out.add_argument("--dry-run", action="store_true",
-                     help="build and print the SOAP requests without sending them")
+                     help="print the query summary without connecting (automatic bases remain unresolved)")
     out.add_argument("-v", "--verbose", action="count", default=0,
                      help="increase verbosity (repeatable)")
 

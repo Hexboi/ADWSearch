@@ -50,3 +50,49 @@ def format_sd_rights_effective(value: int) -> str:
     """Render ``sDRightsEffective`` as ``"OWNER|DACL|SACL"``."""
     names = [name for bit, name in SD_RIGHTS_EFFECTIVE_BITS if value & bit]
     return "|".join(names) if names else str(value)
+
+
+_PASSWORD_PROPERTY_BITS = [
+    (1, "DOMAIN_PASSWORD_COMPLEX"),
+    (2, "DOMAIN_PASSWORD_NO_ANON_CHANGE"),
+    (4, "DOMAIN_PASSWORD_NO_CLEAR_CHANGE"),
+    (8, "DOMAIN_LOCKOUT_ADMINS"),
+    (16, "DOMAIN_PASSWORD_STORE_CLEARTEXT"),
+    (32, "DOMAIN_REFUSE_PASSWORD_CHANGE"),
+]
+
+
+def format_password_policy_value(name: str, value) -> str:
+    """Annotate policy flags and signed 100-ns intervals without losing the raw value."""
+    raw = str(value)
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return raw
+    try:
+        number = int(value)
+    except ValueError:
+        return raw
+    name = name.casefold()
+    if name == "pwdproperties" and number >= 0:
+        flags = [label for bit, label in _PASSWORD_PROPERTY_BITS if number & bit]
+        unknown = number & ~0x3F
+        if unknown:
+            flags.append(f"unknown bits: 0x{unknown:X}")
+        return f"{raw} ({' | '.join(flags) if flags else 'no flags set'})"
+    if name == "lockoutthreshold" and number == 0:
+        return f"{raw} (lockout disabled)"
+    if name == "maxpwdage" and number in (0, -(2**63)):
+        return f"{raw} (never expires)"
+    if name == "lockoutduration" and number in (0, -(2**63)):
+        return f"{raw} (administrator unlock required when lockout is enabled)"
+    if name == "minpwdage" and number == 0:
+        return f"{raw} (no minimum age)"
+    if name == "forcelogoff" and number == -(2**63):
+        return f"{raw} (forced logoff disabled)"
+    if name == "forcelogoff" and number == 0:
+        return f"{raw} (immediate logoff when logon hours expire)"
+    if (name in ("minpwdage", "maxpwdage", "lockoutduration", "lockoutobservationwindow", "forcelogoff")
+            and -(2**63) < number <= 0):
+        seconds, fraction = divmod(-number, 10_000_000)
+        duration = str(seconds) + (f".{fraction:07d}".rstrip("0") if fraction else "")
+        return f"{raw} ({duration} seconds)"
+    return raw

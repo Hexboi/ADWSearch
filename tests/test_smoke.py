@@ -46,6 +46,23 @@ def test_help_warns_about_password_argument_exposure(capsys):
     assert "prefer -W" in help_text
 
 
+def test_help_and_readme_cover_registered_presets():
+    import re
+    from pathlib import Path
+    from adwsearch.enum import PRESETS
+    help_text = build_parser().format_help()
+    examples = help_text.split('examples:', 1)[1].replace('\\\n', ' ')
+    for name in PRESETS:
+        assert '--preset ' + name in examples
+    readme = (Path(__file__).parents[1] / 'README.md').read_text(encoding='utf-8')
+    assert set(re.findall(r'^\| `([^`]+)` \|', readme, re.M)) == set(PRESETS)
+    assert 'forest / domain functional level' not in examples
+    assert 'policy annotations' in help_text
+    commands = [line for line in examples.splitlines() if line.strip().startswith('adwsearch ')]
+    assert any('--preset users-description' in line and '-b ' not in line for line in commands)
+    assert any('--preset password-policy' in line and '-b ' not in line for line in commands)
+
+
 def test_help_distinguishes_kerberoastable_json_from_cracking_hashes(capsys):
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--help"])

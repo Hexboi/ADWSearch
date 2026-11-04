@@ -47,6 +47,11 @@ After configuring the session:
 python -m pytest -m lab
 ```
 
+The `password-policy` checks compare all nine raw domain policy attributes (including `forceLogoff`) with
+the independent signed/sealed LDAP reference, then exercise LDIF/JSON and `--raw`
+through the CLI with automatic base discovery. Edge cases and special interval
+values use synthetic offline fixtures; these tests do not change the domain policy.
+
 The Kerberos suite includes an explicit RC4 case: this needs controller/account
 support and does not enable RC4 on the domain. AD CS checks need a suitable
 Enterprise CA; absent prerequisites produce skips. The suite does not force

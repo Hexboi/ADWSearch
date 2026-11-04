@@ -23,6 +23,7 @@ from typing import Callable, Iterator
 from adwsearch.enum.constants import (
     format_functional_level,
     format_sd_rights_effective,
+    format_password_policy_value,
 )
 from adwsearch.enum.dns_record import parse_dns_record
 from adwsearch.soap.parser import AdObject
@@ -119,6 +120,35 @@ def _maq_run(client, args) -> Iterator[AdObject]:
 def _maq_resolve(args) -> dict:
     return {"base": args.base, "scope": "base",
             "filter": "(objectClass=*)", "attributes": _MAQ_ATTRS}
+
+
+# --- password-policy ------------------------------------------------------
+
+_PASSWORD_POLICY_ATTRS = [
+    "distinguishedName", "minPwdLength", "pwdHistoryLength", "minPwdAge",
+    "maxPwdAge", "pwdProperties", "lockoutThreshold", "lockoutDuration",
+    "lockOutObservationWindow", "forceLogoff",
+]
+
+
+def _password_policy_run(client, args) -> Iterator[AdObject]:
+    for entry in client.search(
+        base=args.base, scope="base", ldap_filter="(objectClass=domainDNS)",
+        attributes=_PASSWORD_POLICY_ATTRS, size_limit=1, page_size=1,
+    ):
+        attributes = {name.casefold(): values for name, values in entry.attributes.items()}
+        entry.attributes = {name: attributes[name.casefold()] for name in _PASSWORD_POLICY_ATTRS
+                            if name.casefold() in attributes}
+        if not getattr(args, "raw", False):
+            for name, values in entry.attributes.items():
+                if name not in ("distinguishedName", "minPwdLength", "pwdHistoryLength"):
+                    entry.attributes[name] = [format_password_policy_value(name, value) for value in values]
+        yield entry
+
+
+def _password_policy_resolve(args) -> dict:
+    return {"base": args.base, "scope": "base", "filter": "(objectClass=domainDNS)",
+            "attributes": _PASSWORD_POLICY_ATTRS}
 
 
 # --- asrep ----------------------------------------------------------------
@@ -402,6 +432,12 @@ def _dns_dump_resolve(args) -> dict:
 # --- registry -------------------------------------------------------------
 
 PRESETS: dict[str, Preset] = {
+    "password-policy": Preset(
+        name="password-policy",
+        description="Read the default domain password, lockout and forced-logoff policy (not per-user FGPP).",
+        run=_password_policy_run,
+        resolve=_password_policy_resolve,
+    ),
     "users-description": Preset(
         name="users-description",
         description="List user accounts and descriptions (default output: table).",

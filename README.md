@@ -14,6 +14,7 @@ Select a check with `--preset NAME`:
 | --- | --- |
 | `forest-level` | The functional level of the domain specified as the search base. |
 | `maq` | The quota that controls how many computers an account can add to the domain. |
+| `password-policy` | The default domain password, account lockout and forced-logoff policy, including readable intervals and property flags. |
 | `asrep` | User accounts without Kerberos preauthentication, for further assessment of AS-REP roasting exposure. |
 | `kerberoastable` | Enabled user accounts with SPNs, for further assessment of Kerberoasting exposure. |
 | `spn` | Objects with registered service principal names, including users and computers. |
@@ -67,6 +68,33 @@ including when the DC belongs to a child domain. A dry-run never connects: omitt
 bases appear as `(auto: defaultNamingContext)` and equivalent partition placeholders.
 
 ### Built-in checks and saving results
+
+To read the default domain password and account lockout policy:
+
+```powershell
+adwsearch -H dc01.corp.local -u alice -d corp.local -W --preset password-policy
+```
+
+This returns `minPwdLength`, `pwdHistoryLength`, `minPwdAge`, `maxPwdAge`,
+`pwdProperties`, `lockoutThreshold`, `lockoutDuration`,
+`lockOutObservationWindow` and `forceLogoff`. Intervals are shown in seconds, alongside the original
+100-nanosecond values; password-property flags include complexity and reversible
+encryption. Special values distinguish no expiration, no minimum age, disabled
+lockout and administrator-only unlock. The last setting matters only when the
+lockout threshold is enabled. Unknown flags and malformed values retain their
+original numeric/text representation.
+
+`forceLogoff` concerns expiration of allowed logon hours, not password expiration:
+zero means immediate forced logoff at that point, while `-9223372036854775808`
+means forced logoff is disabled. Other negative intervals use the same exact
+seconds conversion. With `--raw`, the original value is returned unchanged.
+
+Use `--raw` to keep the original values without annotations, or `-o json` for
+JSON output. The preset reads the domain root, discovered automatically when
+`-b` is omitted. An explicit base must identify a domain root: an OU produces
+no results. Missing attributes remain absent rather than being treated as zero.
+This is the domain default policy; fine-grained policies (FGPP/PSO) and the
+resulting policy for a specific user are not collected.
 
 To list users and their descriptions as one table row per account:
 

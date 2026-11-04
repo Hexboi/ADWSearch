@@ -11,6 +11,8 @@ filter / base / scope / attributes seen by ADWS.
 from contextlib import nullcontext
 from dataclasses import dataclass
 
+import pytest
+
 from adwsearch.adws.client import AdwsClient
 from adwsearch.enum import PRESETS
 from adwsearch.soap import templates
@@ -139,6 +141,79 @@ def test_writable_uses_discovered_forest_partitions_for_child_domain():
     args.configuration_base = 'CN=Configuration,DC=root,DC=test'
     args.schema_base = 'CN=Schema,CN=Configuration,DC=root,DC=test'
     assert _writable_bases(args) == [args.base, args.configuration_base, args.schema_base]
+
+
+@pytest.mark.parametrize('name,value,expected', [
+    ('lockoutDuration', -18000000000, '-18000000000 (1800 seconds)'),
+    ('lockoutDuration', '-18000000000', '-18000000000 (1800 seconds)'),
+    ('minPwdAge', -1, '-1 (0.0000001 seconds)'),
+    ('maxPwdAge', -10000001, '-10000001 (1.0000001 seconds)'),
+    ('maxPwdAge', 0, '0 (never expires)'),
+    ('maxPwdAge', -(2**63), '-9223372036854775808 (never expires)'),
+    ('minPwdAge', 0, '0 (no minimum age)'),
+    ('lockoutDuration', 0, '0 (administrator unlock required when lockout is enabled)'),
+    ('lockoutDuration', -(2**63), '-9223372036854775808 (administrator unlock required when lockout is enabled)'),
+    ('lockOutObservationWindow', 0, '0 (0 seconds)'),
+    ('lockoutThreshold', 0, '0 (lockout disabled)'),
+    ('pwdProperties', 0, '0 (no flags set)'),
+    ('pwdProperties', 1, '1 (DOMAIN_PASSWORD_COMPLEX)'),
+    ('pwdProperties', 2, '2 (DOMAIN_PASSWORD_NO_ANON_CHANGE)'),
+    ('pwdProperties', 4, '4 (DOMAIN_PASSWORD_NO_CLEAR_CHANGE)'),
+    ('pwdProperties', 8, '8 (DOMAIN_LOCKOUT_ADMINS)'),
+    ('pwdProperties', 16, '16 (DOMAIN_PASSWORD_STORE_CLEARTEXT)'),
+    ('pwdProperties', 32, '32 (DOMAIN_REFUSE_PASSWORD_CHANGE)'),
+    ('pwdProperties', 17, '17 (DOMAIN_PASSWORD_COMPLEX | DOMAIN_PASSWORD_STORE_CLEARTEXT)'),
+    ('pwdProperties', 65, '65 (DOMAIN_PASSWORD_COMPLEX | unknown bits: 0x40)'),
+    ('maxPwdAge', 1, '1'), ('maxPwdAge', 'bad', 'bad'),
+    ('maxPwdAge', 1.5, '1.5'), ('pwdProperties', -1, '-1'),
+    ('minPwdLength', 12, '12'),
+    ('forceLogoff', 0, '0 (immediate logoff when logon hours expire)'),
+    ('forceLogoff', -(2**63), '-9223372036854775808 (forced logoff disabled)'),
+    ('forceLogoff', '-9223372036854775808', '-9223372036854775808 (forced logoff disabled)'),
+    ('forceLogoff', -3000000000, '-3000000000 (300 seconds)'),
+    ('forceLogoff', -1, '-1 (0.0000001 seconds)'),
+    ('forceLogoff', 'bad', 'bad'),
+    ('forceLogoff', 1, '1'),
+])
+def test_password_policy_formatting(name, value, expected):
+    from adwsearch.enum.constants import format_password_policy_value
+    assert format_password_policy_value(name, value) == expected
+
+
+@pytest.mark.parametrize('raw', [False, True])
+def test_password_policy_base_query_projection_and_raw(raw):
+    args = FakeArgs()
+    args.raw = raw
+    transport = FakeTransport([
+        enum_response('POLICY'), pull_response([item('domainDNS', {
+            'distinguishedName': [args.base], 'minPwdLength': [12],
+            'maxPwdAge': [-10000000], 'pwdProperties': [1], 'forceLogoff': [0],
+            'other': ['excluded'],
+        })]),
+    ])
+    preset = PRESETS['password-policy']
+    output = list(preset.run(AdwsClient(transport, 'dc01'), args))
+    assert len(output) == 1
+    attributes = output[0].attributes
+    assert set(attributes) == {'distinguishedName', 'minPwdLength', 'maxPwdAge', 'pwdProperties', 'forceLogoff'}
+    assert attributes['distinguishedName'] == [args.base]
+    assert attributes['maxPwdAge'] == ([-10000000] if raw else ['-10000000 (1 seconds)'])
+    assert attributes['minPwdLength'] == [12]
+    assert attributes['forceLogoff'] == ([0] if raw else ['0 (immediate logoff when logon hours expire)'])
+    resolved = preset.resolve(args)
+    assert resolved['filter'] == '(objectClass=domainDNS)'
+    assert resolved['scope'] == 'base'
+    assert resolved['base'] == args.base
+    assert 'forceLogoff' in resolved['attributes']
+    assert text_of(transport.requests[0], 'BaseObject') == args.base
+    assert selection_props(transport.requests[0]) == [
+        'ad:' + name if name == 'distinguishedName' else 'addata:' + name
+        for name in resolved['attributes']]
+
+
+def test_password_policy_empty_response():
+    transport = FakeTransport([enum_response('EMPTY'), pull_response([])])
+    assert list(PRESETS['password-policy'].run(AdwsClient(transport, 'dc01'), FakeArgs())) == []
 
 
 # --- forest-level ---------------------------------------------------------
