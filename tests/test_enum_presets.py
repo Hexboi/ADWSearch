@@ -103,12 +103,12 @@ class FakeArgs:
     spn_class: str | None = None
 
 
-def test_forest_level_formats_numeric_text_from_real_adws():
+def test_forest_level_preserves_numeric_text_from_real_adws():
     from unittest.mock import Mock
     client = Mock()
     client.get.return_value = AdObject('domainDNS', {'msDS-Behavior-Version': ['7']})
     assert list(PRESETS['forest-level'].run(client, FakeArgs()))[0].attributes['msDS-Behavior-Version'] == [
-        '7 (DS_BEHAVIOR_WIN2016)']
+        '7']
 
 
 def test_writable_zero_numeric_text_does_not_claim_writable():
@@ -230,8 +230,8 @@ def test_forest_level_uses_wstransfer_get():
     assert text_of(t.requests[0], "Action") == ACTION_GET
     assert text_of(t.requests[0], "objectReferenceProperty", prefix="ad") == \
         "DC=corp,DC=local"
-    # Decoder applied: integer 7 -> labelled release name.
-    assert out[0].attributes["msDS-Behavior-Version"] == ["7 (DS_BEHAVIOR_WIN2016)"]
+    # Leave decoding to the output writer so --raw preserves the original value.
+    assert out[0].attributes["msDS-Behavior-Version"] == [7]
 
 
 def test_forest_level_decoder_maps_int_to_release_name():
@@ -258,7 +258,7 @@ def test_forest_level_trims_to_single_attribute():
     ])
     out = list(PRESETS["forest-level"].run(resource_client(t, "dc01"), FakeArgs()))
     assert list(out[0].attributes.keys()) == ["msDS-Behavior-Version"]
-    assert out[0].attributes["msDS-Behavior-Version"] == ["7 (DS_BEHAVIOR_WIN2016)"]
+    assert out[0].attributes["msDS-Behavior-Version"] == [7]
 
 
 def test_maq_trims_to_single_attribute():

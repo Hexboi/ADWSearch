@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from typing import Callable, Iterator
 
 from adwsearch.enum.constants import (
-    format_functional_level,
     format_sd_rights_effective,
     format_password_policy_value,
 )
@@ -70,11 +69,8 @@ def _forest_level_run(client, args) -> Iterator[AdObject]:
     entry = client.get(args.base)
     if entry is None:
         return
-    vals = entry.attributes.get("msDS-Behavior-Version") or []
     trimmed = {
-        "msDS-Behavior-Version": [
-            format_functional_level(_numeric(v)) if isinstance(_numeric(v), int) else v for v in vals
-        ],
+        "msDS-Behavior-Version": entry.attributes.get("msDS-Behavior-Version") or [],
     }
     # Preserve the server-synthesised distinguishedName (MS-ADDM 2.3.3.3)
     # so the LDIF writer still emits a `dn:` line; without it the output

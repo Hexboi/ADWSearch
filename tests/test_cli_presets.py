@@ -234,6 +234,26 @@ def test_spn_class_kerberoastable_is_rejected_with_migration_message(capsys):
     assert "--preset kerberoastable" in err
 
 
+@pytest.mark.parametrize('fmt', ['ldif', 'json'])
+@pytest.mark.parametrize('raw', [False, True])
+def test_forest_level_cli_formats_and_raw_without_warning(patched_backend, capsys, fmt, raw):
+    import json
+    argv = ['-H', 'dc01', '-u', 'alice', '-w', 'pw', '-b', 'DC=corp,DC=local',
+            '--preset', 'forest-level', '-o', fmt]
+    if raw:
+        argv += ['--raw']
+    assert cli.main(argv) == 0
+    output = capsys.readouterr()
+    expected = '7' if raw else '7 (DS_BEHAVIOR_WIN2016)'
+    if fmt == 'json':
+        entry = json.loads(output.out)[0]
+        assert entry['dn'] == 'DC=corp,DC=local'
+        assert entry['attributes']['msDS-Behavior-Version'] == [expected]
+    else:
+        assert output.out == f'dn: DC=corp,DC=local\nmsDS-Behavior-Version: {expected}\n\n'
+    assert output.err == ''
+
+
 def test_preset_forest_level_uses_wstransfer_get(patched_backend):
     """forest-level is a single-object read; it must call client.get, not search."""
     cli.main([

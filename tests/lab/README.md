@@ -39,13 +39,29 @@ Optional variables:
   cases are skipped if it is absent. Do not commit the cache.
 - `ADWSEARCH_LAB_SPN`: explicit SPN, otherwise `host/<controller FQDN>`.
 - `ADWSEARCH_LAB_TIMEOUT`: socket timeout in seconds, default `10`.
-- `ADWSEARCH_LAB_SOCKS`: optional SOCKS5 proxy; its test is skipped if absent.
+- `ADWSEARCH_LAB_SOCKS`: optional `[socks4://|socks5://]HOST:PORT` proxy
+  (default SOCKS5); its test is skipped if absent.
 
 After configuring the session:
 
 ```powershell
 python -m pytest -m lab
 ```
+
+To verify full NTLM authentication and `forest-level` through an existing SOCKS4
+proxy, also set `ADWSEARCH_LAB_SOCKS=socks4://127.0.0.1:8443` and run:
+
+```powershell
+python -m pytest tests/lab/test_adws_lab.py::test_socks_route_and_forest_level_when_configured -q
+```
+
+This test performs a base query through the proxy, then runs the real CLI with
+automatic base discovery and `forest-level`, comparing normal and `--raw` JSON
+against direct ADWS. The raw value is also checked against independent signed/sealed
+LDAP. Only password entry is supplied by the fixture; authentication and network
+transports are real. On 10 November 2026 it passed against VirtualBox GOAD through
+a temporary local SOCKS4 relay (seven proxied connections, no relay errors).
+This did not exercise the Zaiux HTTPS tunnel or Kerberos through SOCKS.
 
 The `password-policy` checks compare all nine raw domain policy attributes (including `forceLogoff`) with
 the independent signed/sealed LDAP reference, then exercise LDIF/JSON and `--raw`

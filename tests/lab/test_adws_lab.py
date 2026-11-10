@@ -236,12 +236,36 @@ def test_pass_the_hash_matches_password(lab_settings, lab_client):
     assert entries[0].attributes == password_entries[0].attributes
 
 
-def test_socks_route_when_configured(lab_settings):
+def test_socks_route_and_forest_level_when_configured(lab_settings, monkeypatch, tmp_path):
+    import json
+    from adwsearch import cli
+
     proxy = os.environ.get("ADWSEARCH_LAB_SOCKS")
     if not proxy:
         pytest.skip("set ADWSEARCH_LAB_SOCKS for the optional proxy path")
-    from adwsearch.cli import _build_socks5_factory
+    from adwsearch.cli import _build_socks_factory
     s = lab_settings
     with connect_adws(s.ip, 9389, NtlmSecurityContext(s.credentials()), timeout=s.timeout,
-                      socket_factory=_build_socks5_factory(proxy, s.timeout)) as connection:
+                      socket_factory=_build_socks_factory(proxy, s.timeout)) as connection:
         assert len(list(AdwsClient(connection, s.host).search(s.base, scope="base", page_size=1))) == 1
+
+    # Exercise real NTLM and both Enumeration/Resource endpoints through the CLI.
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: s.password)
+    argv = ["-H", s.host, "--dc-ip", s.ip, "-u", s.user, "-d", s.domain,
+            "-W", "--preset", "forest-level", "-o", "json", "--timeout", str(s.timeout)]
+    reference = ldap_query(s.base, scope="base", attributes=["msDS-Behavior-Version"])
+    expected = str(reference[0].attributes["msDS-Behavior-Version"][0])
+    for raw in (False, True):
+        outputs = []
+        for route in ([], ["--socks", proxy]):
+            path = tmp_path / f"forest-level-{raw}-{bool(route)}.json"
+            assert cli.main([*argv, *route, "--outfile", str(path),
+                             *(["--raw"] if raw else [])]) == 0
+            rows = json.loads(path.read_text(encoding="utf-8"))
+            assert len(rows) == 1
+            assert rows[0]["dn"].casefold() == s.base.casefold()
+            assert set(rows[0]["attributes"]) == {"msDS-Behavior-Version", "distinguishedName"}
+            if raw:
+                assert str(rows[0]["attributes"]["msDS-Behavior-Version"][0]) == expected
+            outputs.append(rows)
+        assert outputs[0] == outputs[1]

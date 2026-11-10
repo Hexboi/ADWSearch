@@ -4,8 +4,8 @@
 """Command-line interface for ADWSearch.
 
 Wires argparse → :class:`Credentials` → NTLM/Kerberos SecurityContext → ``connect_adws``
-→ :class:`AdwsClient.search` → LDIF/JSON/table writer. SOCKS5 is enabled with ``--socks
-HOST:PORT`` (uses PySocks); ``--dry-run`` prints the summary of what would be sent without
+→ :class:`AdwsClient.search` → LDIF/JSON/table writer. SOCKS is enabled with ``--socks
+[socks4://|socks5://]HOST:PORT`` (uses PySocks); ``--dry-run`` prints the summary of what would be sent without
 opening a socket.
 """
 
@@ -17,6 +17,8 @@ import getpass
 import math
 import os
 import sys
+
+from socks import ProxyError
 
 from adwsearch import __version__
 from adwsearch.adws.client import AdwsClient
@@ -56,6 +58,10 @@ examples:
   # SOCKS5 pivot through a beacon on 127.0.0.1:1080 (IPv6 literals supported).
   adwsearch -H dc01.corp.local --dc-ip 10.10.1.10 -u alice@corp.local -W \\
       --socks 127.0.0.1:1080 -b 'DC=corp,DC=local' '(objectClass=computer)'
+
+  # SOCKS4 pivot: full NTLM authentication + forest-level (verified in VirtualBox).
+  adwsearch -H dc01.corp.local --dc-ip 10.10.1.10 -u alice@corp.local -W \\
+      --socks socks4://127.0.0.1:8443 --preset forest-level
 
   # Presets below discover the DC's domain automatically when -b is omitted.
   # Enum preset: domain functional level (the historical name is forest-level).
@@ -149,8 +155,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="DC IP address, if DNS does not resolve the host")
     conn.add_argument("-p", "--port", type=int, default=DEFAULT_PORT,
                       help=f"ADWS port (default: {DEFAULT_PORT})")
-    conn.add_argument("--socks", metavar="HOST:PORT",
-                      help="route the connection through a SOCKS5 proxy")
+    conn.add_argument("--socks", metavar="[socks4://|socks5://]HOST:PORT",
+                      help="route through a SOCKS proxy (default: SOCKS5; use socks4:// for SOCKS4)")
     conn.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, metavar="SEC",
                       help=f"socket timeout in seconds (default: {DEFAULT_TIMEOUT})")
     conn.add_argument("--sleep", type=float, default=0.0, metavar="SEC",
@@ -296,14 +302,27 @@ def _parse_host_port(spec: str) -> tuple[str, int]:
         ) from None
 
 
-def _build_socks5_factory(socks_arg: str, timeout: int):
-    """Return a socket_factory(host, port) that dials through a SOCKS5 proxy."""
-    proxy_host, proxy_port = _parse_host_port(socks_arg)
+def _parse_socks_proxy(spec: str) -> tuple[str, str, int]:
+    scheme, separator, address = spec.partition("://")
+    if not separator:
+        scheme, address = "socks5", spec
+    if scheme not in ("socks4", "socks5"):
+        raise ValueError("expected socks4:// or socks5:// (default: SOCKS5)")
+    if any(char in address for char in "/?#@"):
+        raise ValueError("expected HOST:PORT without credentials, path, query or fragment")
+    host, port = _parse_host_port(address)
+    return scheme, host, port
+
+
+def _build_socks_factory(socks_arg: str, timeout: int):
+    """Return a socket_factory(host, port) that dials through SOCKS4 or SOCKS5."""
+    scheme, proxy_host, proxy_port = _parse_socks_proxy(socks_arg)
 
     def factory(host, port):
-        import socks  # imported lazily so PySocks is optional at install time
+        import socks
         s = socks.socksocket()
-        s.set_proxy(socks.SOCKS5, proxy_host, proxy_port)
+        s.set_proxy(socks.SOCKS4 if scheme == "socks4" else socks.SOCKS5,
+                    proxy_host, proxy_port)
         s.settimeout(timeout)
         s.connect((host, port))
         return s
@@ -413,7 +432,7 @@ def _main(argv: list[str] | None = None) -> int:
             parser.error("--hashes requires [LM]:NT with 32 hexadecimal characters per nonempty hash")
     if args.socks:
         try:
-            _parse_host_port(args.socks)
+            _parse_socks_proxy(args.socks)
         except ValueError as exc:
             parser.error(f"--socks: {exc}")
     username, domain = _split_user(args.user, args.domain)
@@ -470,7 +489,7 @@ def _main(argv: list[str] | None = None) -> int:
         parser.error("--jitter must be >= 0")
     if args.socks:
         try:
-            _parse_host_port(args.socks)
+            _parse_socks_proxy(args.socks)
         except ValueError as exc:
             parser.error(f"--socks: {exc}")
 
@@ -503,8 +522,8 @@ def _main(argv: list[str] | None = None) -> int:
         _dry_run(args, connect_host, credentials)
         return 0
 
-    # --- socket factory (SOCKS5 or direct) ---------------------------------
-    socket_factory = _build_socks5_factory(args.socks, args.timeout) if args.socks else None
+    # --- socket factory (SOCKS or direct) ----------------------------------
+    socket_factory = _build_socks_factory(args.socks, args.timeout) if args.socks else None
 
     # --- connect + search + write ------------------------------------------
     conn = connect_adws(connect_host, args.port, make_security(),
@@ -592,6 +611,9 @@ def main(argv: list[str] | None = None) -> int:
     from adwsearch.transport.nns import NnsHandshakeError
     try:
         return _main(argv)
+    except ProxyError as exc:
+        print(f"error: SOCKS proxy failed ({type(exc).__name__}): {exc}", file=sys.stderr)
+        return 1
     except (OSError, EOFError, AdwsSoapFault, NnsHandshakeError, KerberosError,
             KerberosAuthenticationError) as exc:
         print(f"error: operation failed ({type(exc).__name__})", file=sys.stderr)

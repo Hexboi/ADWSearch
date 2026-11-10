@@ -60,6 +60,28 @@ Without a filter or attributes, the tool searches for all objects below the spec
 
 If the controller hostname does not resolve, add `--dc-ip 10.10.1.10` while keeping the correct hostname in `-H`.
 
+Use `--socks 127.0.0.1:1080` for SOCKS5 (also accepted as
+`--socks socks5://127.0.0.1:1080`). For a SOCKS4 proxy, such as a pivot used
+with proxychains configured as `socks4 127.0.0.1 8443`, use
+`--socks socks4://127.0.0.1:8443`. Proxy authentication is not supported.
+With `--dc-ip`, the proxy connects to that IP on the ADWS port (default 9389).
+Proxy errors include the underlying failure reason.
+
+For full NTLM authentication and the `forest-level` preset through SOCKS4:
+
+```powershell
+adwsearch -H dc01.corp.local --dc-ip 10.10.1.10 -u alice@corp.local -W --socks socks4://127.0.0.1:8443 --preset forest-level
+```
+
+Verified on 10 November 2026 against the VirtualBox GOAD domain controller through
+a temporary local SOCKS4 relay: full NTLM authentication, automatic RootDSE base
+discovery, and `forest-level` over the Enumeration and Resource endpoints. Both
+normal and `--raw` JSON output matched a direct ADWS connection; the raw value
+also matched an independent signed/sealed LDAP query. The lab returned
+`7 (DS_BEHAVIOR_WIN2016)` (`7` with `--raw`). This verifies the SOCKS4 client path;
+the Zaiux HTTPS tunnel itself was not tested. Despite its historical name,
+`forest-level` reads the functional level of the domain selected by the search base.
+
 The account domain (`-d`) is independent of the search base and remains available.
 Base discovery uses the controller's domain, never a DN guessed from `-d` or the
 username. If RootDSE discovery is unavailable, the tool asks for an explicit `-b`.
