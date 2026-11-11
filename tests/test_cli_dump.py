@@ -14,11 +14,35 @@ from adwsearch.transport.connection import AdwsConnection
 from adwsearch.soap.parser import AdObject
 
 
+@pytest.mark.parametrize('mode', ['buildcache', 'bhdump', 'autosplit'])
+@pytest.mark.parametrize('page_size', [None, 7])
+def test_dump_cli_page_size_reaches_every_search(monkeypatch, tmp_path, mode, page_size):
+    conn = MagicMock(spec=AdwsConnection)
+    monkeypatch.setattr(cli, 'connect_adws', lambda *a, **kw: conn)
+    client = MagicMock()
+    client.search.return_value = []
+    monkeypatch.setattr(cli, 'AdwsClient', lambda *a, **kw: client)
+    cache_path = tmp_path / 'cache.json'
+    Cache().serialize(str(cache_path))
+    argv = ['-H', 'dc01', '-u', 'alice', '-w', 'pw', '-b', 'DC=corp,DC=local',
+            '--dump', 'buildcache' if mode == 'buildcache' else 'bhdump',
+            '--cachefile', str(cache_path), '--outdir', str(tmp_path / 'dump')]
+    if page_size is not None:
+        argv += ['--page-size', str(page_size)]
+    if mode == 'autosplit':
+        argv += ['--autosplit']
+
+    assert cli.main(argv) == 0
+    assert client.search.call_count == (37 if mode == 'autosplit' else 1)
+    expected = cli.DEFAULT_PAGE_SIZE if page_size is None else page_size
+    assert all(call.kwargs['page_size'] == expected for call in client.search.call_args_list)
+
+
 @pytest.mark.parametrize('explicit_base', [True, False])
 def test_cli_dump_buildcache_invokes_build_and_serialize(monkeypatch, tmp_path, capsys, explicit_base):
     called = {}
 
-    def fake_build_cache(client, base):
+    def fake_build_cache(client, base, *, page_size):
         called["base"] = base
         c = Cache()
         c.value_to_id = {"cn=alice,dc=x": "S-1-5-21-1-1-1-1001"}
@@ -93,7 +117,7 @@ def test_cli_dump_bhdump_dispatches_and_reads_cache(monkeypatch, tmp_path, capsy
 
     called = {}
 
-    def fake_bhdump(client, base, out, cache, autosplit=False):
+    def fake_bhdump(client, base, out, cache, autosplit=False, *, page_size):
         called["base"] = base
         called["outdir"] = out
         called["cache_size"] = len(cache.value_to_id)

@@ -192,7 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
                         metavar="SCOPE",
                         help="search scope: base|one|sub (default: sub)")
     search.add_argument("-z", "--sizelimit", type=int, default=0, metavar="N",
-                        help="maximum entries to return (0 = unlimited)")
+                        help="maximum search entries to return (0 = unlimited; dumps collect all objects)")
     search.add_argument("--page-size", type=int, default=DEFAULT_PAGE_SIZE, metavar="N",
                         help=f"WS-Enumeration Pull batch size (default: {DEFAULT_PAGE_SIZE})")
     search.add_argument("filter", nargs="?", default=DEFAULT_FILTER,
@@ -554,7 +554,7 @@ def _main(argv: list[str] | None = None) -> int:
                 return 1
         if args.dump == "buildcache":
             from adwsearch.dump import build_cache
-            cache = build_cache(client, args.base)
+            cache = build_cache(client, args.base, page_size=args.page_size)
             cache.serialize(args.cachefile)
             print(f"cache written: {args.cachefile} "
                   f"({len(cache.value_to_id)} objects)")
@@ -566,7 +566,7 @@ def _main(argv: list[str] | None = None) -> int:
                     f"--dump bhdump requires an existing cache at {args.cachefile}; "
                     "run --dump buildcache first")
             counts = bhdump(client, args.base, args.outdir, cache,
-                            autosplit=args.autosplit)
+                            autosplit=args.autosplit, page_size=args.page_size)
             total = sum(counts.values())
             print(f"bhdump written to {args.outdir}: {total} nodes")
             for kind, n in counts.items():

@@ -186,6 +186,14 @@ adwsearch -H dc01.corp.local -u alice@corp.local -W -b "DC=corp,DC=local" --dump
 adwsearch --dump showstats --cachefile corp-cache.json
 ```
 
+`--page-size N` controls the number of objects requested per page for both
+`buildcache` and `bhdump`, including every `--autosplit` slice (CLI default: 256).
+Smaller pages reduce response size; they do not limit the total collection.
+`-z/--sizelimit` applies to ordinary searches; dumps collect all objects under
+the selected base. `--autosplit` divides `bhdump` by name prefix and preserves
+the complete result set. `--sleep 5 --jitter 2` adds a 5–7 second pause between
+requests; smaller pages and autosplit require more requests and thus more time.
+
 ## Development and tests
 
 From the project directory, with the virtual environment active:

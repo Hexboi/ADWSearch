@@ -41,7 +41,7 @@ _sid_to_string = sid_to_canonical
 _guid_to_string = guid_to_canonical
 
 
-def build_cache(client, base: str) -> Cache:
+def build_cache(client, base: str, *, page_size: int = 1000) -> Cache:
     """Enumerate ``base`` (subtree) once and return a populated :class:`Cache`.
 
     ``client`` is an :class:`AdwsClient` (or any object with a ``search`` method
@@ -51,7 +51,7 @@ def build_cache(client, base: str) -> Cache:
     cache = Cache()
     for entry in client.search(
         base=base, scope="sub", ldap_filter="(!soaphound=*)",
-        attributes=_CACHE_ATTRS, size_limit=0, page_size=1000,
+        attributes=_CACHE_ATTRS, size_limit=0, page_size=page_size,
     ):
         attrs = entry.attributes
         dn = _first(attrs.get("distinguishedName") or [])

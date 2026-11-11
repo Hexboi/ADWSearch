@@ -382,11 +382,11 @@ _BUILDERS = {
     Label.Domain: ("domains", _make_domain_node),
 }
 
-def _run_one_query(client, base: str, ldap_filter: str, cache, buckets):
+def _run_one_query(client, base: str, ldap_filter: str, cache, buckets, page_size: int):
     """Execute one bhdump-scoped query and return the buckets."""
     for entry in client.search(
         base=base, scope="sub", ldap_filter=ldap_filter,
-        attributes=BH_ATTRS, size_limit=0, page_size=1000,
+        attributes=BH_ATTRS, size_limit=0, page_size=page_size,
         ldap_controls=[(SD_FLAGS_OID, SD_FLAGS_ALL)],
     ):
         label = class_to_label(entry.object_class)
@@ -427,7 +427,7 @@ def _autosplit_filters():
 
 
 def bhdump(client, base: str, outdir: str, cache, header: str = "full",
-           autosplit: bool = False) -> dict[str, int]:
+           autosplit: bool = False, *, page_size: int = 1000) -> dict[str, int]:
     """Run the BloodHound-style dump. Returns per-kind counts.
 
     When ``autosplit`` is True, iterate one query per leading CN letter (plus
@@ -440,7 +440,7 @@ def bhdump(client, base: str, outdir: str, cache, header: str = "full",
 
     if not autosplit:
         with JsonBucketSpool(outdir) as buckets:
-            _run_one_query(client, base, "(!soaphound=*)", cache, buckets)
+            _run_one_query(client, base, "(!soaphound=*)", cache, buckets, page_size)
             counts = buckets.publish(header)
         _log.info("bhdump written to %s: %s", outdir, counts)
         return counts
@@ -448,7 +448,7 @@ def bhdump(client, base: str, outdir: str, cache, header: str = "full",
     total_counts: dict[str, int] = {kind: 0 for kind, _ in _BUILDERS.values()}
     for slice_header, ldap_filter in _autosplit_filters():
         with JsonBucketSpool(outdir) as buckets:
-            _run_one_query(client, base, ldap_filter, cache, buckets)
+            _run_one_query(client, base, ldap_filter, cache, buckets, page_size)
             if not buckets:
                 continue
             slice_counts = buckets.publish(slice_header)

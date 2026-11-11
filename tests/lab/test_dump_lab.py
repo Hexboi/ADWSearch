@@ -13,6 +13,66 @@ from tests.lab.reference import ldap_query
 pytestmark = pytest.mark.lab
 
 
+@pytest.mark.parametrize('page_size,autosplit,sleep,jitter', [
+    (1, False, 0, 0), (32, False, 0, 0), (1000, False, 0, 0),
+    (2, True, 0, 0), (1000, False, 5, 2),
+])
+def test_dump_cli_page_size_on_wire(lab_client, lab_settings, monkeypatch, tmp_path,
+                                    record_property, page_size, autosplit, sleep, jitter):
+    from adwsearch import cli
+    from adwsearch.dump import Cache
+    from adwsearch.soap import templates
+
+    s = lab_settings
+    cache = build_cache(lab_client, s.base)
+    baseline = tmp_path / 'baseline'
+    bhdump(lab_client, s.base, str(baseline), cache)
+
+    def nodes(directory):
+        result = {}
+        for path in directory.glob('*.json'):
+            payload = json.loads(path.read_text(encoding='utf-8'))
+            assert payload['meta']['count'] == len(payload['data'])
+            for node in payload['data']:
+                if 'ChildObjects' in node:
+                    node['ChildObjects'].sort(key=lambda child: child['ObjectIdentifier'])
+                key = (payload['meta']['type'], node['ObjectIdentifier'])
+                assert key not in result
+                result[key] = node
+        return result
+
+    pull_sizes = []
+    original_pull = templates.pull_request
+
+    def measured_pull(host, context, max_elements, *args, **kwargs):
+        pull_sizes.append(max_elements)
+        return original_pull(host, context, max_elements, *args, **kwargs)
+
+    monkeypatch.setattr(templates, 'pull_request', measured_pull)
+    monkeypatch.setattr(cli.getpass, 'getpass', lambda prompt: s.password)
+    cache_path = tmp_path / 'cache.json'
+    argv = ['-H', s.host, '--dc-ip', s.ip, '-u', s.user, '-d', s.domain, '-W',
+            '--page-size', str(page_size), '-z', '3', '--cachefile', str(cache_path),
+            '--sleep', str(sleep), '--jitter', str(jitter)]
+    assert cli.main([*argv, '--dump', 'buildcache']) == 0
+    actual_cache = Cache.deserialize(str(cache_path))
+    assert actual_cache.value_to_id == cache.value_to_id
+    assert actual_cache.id_to_type == cache.id_to_type
+    assert pull_sizes and set(pull_sizes) == {page_size}
+    record_property('buildcache_pull_count', len(pull_sizes))
+    record_property('buildcache_max_elements', page_size)
+    pull_sizes.clear()
+
+    output = tmp_path / 'actual'
+    assert cli.main([*argv, '--dump', 'bhdump', '--outdir', str(output),
+                     *(['--autosplit'] if autosplit else [])]) == 0
+    assert pull_sizes and set(pull_sizes) == {page_size}
+    assert nodes(output) == nodes(baseline)
+    record_property('bhdump_pull_count', len(pull_sizes))
+    record_property('bhdump_max_elements', page_size)
+    record_property('nodes', len(nodes(output)))
+
+
 def test_cache_and_bloodhound_autosplit_agree(lab_client, lab_settings, tmp_path):
     cache = build_cache(lab_client, lab_settings.base)
     from impacket.ldap.ldaptypes import LDAP_SID
