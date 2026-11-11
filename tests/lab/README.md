@@ -68,6 +68,14 @@ the independent signed/sealed LDAP reference, then exercise LDIF/JSON and `--raw
 through the CLI with automatic base discovery. Edge cases and special interval
 values use synthetic offline fixtures; these tests do not change the domain policy.
 
+The AD CS CLI checks use page sizes 1, 7, and 256 and inspect actual Pull
+requests. They compare template flags and publication with independent signed
+LDAP, and include real `--sleep 5 --jitter 2` pauses in the 256-object case.
+The synthetic ESC1 AllExtendedRights regression does not modify lab templates.
+The same checks compare issuance-policy/group joins and ESC13/ESC17 prerequisites
+with LDAP. A TCP connection guard permits the ADWSearch collection to connect
+only to the configured DC on port 9389; LDAP references run separately.
+
 The Kerberos suite includes an explicit RC4 case: this needs controller/account
 support and does not enable RC4 on the domain. AD CS checks need a suitable
 Enterprise CA; absent prerequisites produce skips. The suite does not force

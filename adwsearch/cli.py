@@ -122,6 +122,10 @@ examples:
       -b 'DC=corp,DC=local' --sleep 1 --jitter 2 \\
       --dump bhdump --cachefile corp-cache.json --outdir bh-out
 
+  # AD CS: ESC13 issuance-policy/group links and ESC17 server-authentication templates.
+  adwsearch -H dc01.corp.local -u alice@corp.local -W \\
+      --dump certdump --cachefile corp-cache.json --outdir adcs-out --page-size 32
+
   # Dry-run - preview the query without connecting; an automatic base stays unresolved.
   adwsearch -H dc01.corp.local -u alice@corp.local -W \\
       --preset password-policy --dry-run
@@ -229,7 +233,9 @@ def build_parser() -> argparse.ArgumentParser:
     dump = parser.add_argument_group(
         "dump",
         "Massive dump modes (SOAPHound-style). Mutually exclusive with --preset "
-        "and positional filter/attributes.",
+        "and positional filter/attributes. certdump includes ESC13 issuance-policy/group "
+        "links and ESC17 server-authentication checks. Collection uses only ADWS on the DC; "
+        "no CA RPC/HTTP access or certificate requests.",
     )
     dump.add_argument("--dump",
                       choices=("buildcache", "showstats", "bhdump", "certdump"),
@@ -578,7 +584,7 @@ def _main(argv: list[str] | None = None) -> int:
                 parser.error(
                     f"--dump certdump requires an existing cache at {args.cachefile}; "
                     "run --dump buildcache first")
-            counts = certdump(client, args.base, args.outdir, cache)
+            counts = certdump(client, args.base, args.outdir, cache, page_size=args.page_size)
             print(f"certdump written to {args.outdir}: "
                   f"{counts['cas']} CAs, {counts['templates']} templates")
             return 0

@@ -14,7 +14,7 @@ from adwsearch.transport.connection import AdwsConnection
 from adwsearch.soap.parser import AdObject
 
 
-@pytest.mark.parametrize('mode', ['buildcache', 'bhdump', 'autosplit'])
+@pytest.mark.parametrize('mode', ['buildcache', 'bhdump', 'autosplit', 'certdump'])
 @pytest.mark.parametrize('page_size', [None, 7])
 def test_dump_cli_page_size_reaches_every_search(monkeypatch, tmp_path, mode, page_size):
     conn = MagicMock(spec=AdwsConnection)
@@ -25,7 +25,7 @@ def test_dump_cli_page_size_reaches_every_search(monkeypatch, tmp_path, mode, pa
     cache_path = tmp_path / 'cache.json'
     Cache().serialize(str(cache_path))
     argv = ['-H', 'dc01', '-u', 'alice', '-w', 'pw', '-b', 'DC=corp,DC=local',
-            '--dump', 'buildcache' if mode == 'buildcache' else 'bhdump',
+            '--dump', 'bhdump' if mode == 'autosplit' else mode,
             '--cachefile', str(cache_path), '--outdir', str(tmp_path / 'dump')]
     if page_size is not None:
         argv += ['--page-size', str(page_size)]
@@ -33,7 +33,7 @@ def test_dump_cli_page_size_reaches_every_search(monkeypatch, tmp_path, mode, pa
         argv += ['--autosplit']
 
     assert cli.main(argv) == 0
-    assert client.search.call_count == (37 if mode == 'autosplit' else 1)
+    assert client.search.call_count == {'buildcache': 1, 'bhdump': 1, 'autosplit': 37, 'certdump': 3}[mode]
     expected = cli.DEFAULT_PAGE_SIZE if page_size is None else page_size
     assert all(call.kwargs['page_size'] == expected for call in client.search.call_args_list)
 

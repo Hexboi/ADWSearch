@@ -6,6 +6,8 @@
 import json
 import uuid
 
+import pytest
+
 from adwsearch.dump import Cache, certdump
 from adwsearch.soap.parser import AdObject
 
@@ -135,6 +137,8 @@ class _StubClient:
             yield from (
                 e for e in self.entries if e.object_class == "pkicertificatetemplate"
             )
+        elif "msPKI-Enterprise-Oid" in f:
+            yield from (e for e in self.entries if e.object_class == 'mspki-enterprise-oid')
 
     def get(self, dn):
         return None
@@ -176,3 +180,131 @@ def test_template_properties_decoded_for_bloodhound(tmp_path):
     assert props["enabled"] is True
     assert "Client Authentication" in props["effectiveekus"]
     assert "ENROLLEE_SUPPLIES_SUBJECT" in props["certificatenameflags"]
+
+
+@pytest.mark.parametrize('enrollment_flag,signatures,expected', [
+    (0, 0, True), (2, 0, False), (0, 1, False),
+])
+def test_esc1_all_extended_rights_respects_issuance_requirements(
+        tmp_path, enrollment_flag, signatures, expected):
+    template = _esc1_template()
+    template.attributes['nTSecurityDescriptor'] = [
+        _mk_sd_bytes_single_ace(DOMAIN_USERS_SID, 0x100)]
+    template.attributes['msPKI-Enrollment-Flag'] = [enrollment_flag]
+    template.attributes['msPKI-RA-Signature'] = [signatures]
+    certdump(_StubClient([_ca_entry(), template]), 'DC=corp,DC=local', str(tmp_path), Cache())
+    rows = json.loads((tmp_path / 'ADCSFindings.json').read_text())['data']
+    esc1 = [row for row in rows if 'ESC1' in row['findings']]
+    assert bool(esc1) is expected
+    if expected:
+        assert esc1[0]['principals_by_finding']['ESC1'] == [DOMAIN_USERS_SID]
+
+
+def test_domain_dns_subject_flag_does_not_create_esc1(tmp_path):
+    template = _esc1_template()
+    template.attributes['msPKI-Certificate-Name-Flag'] = [0x00400000]
+    certdump(_StubClient([_ca_entry(), template]), 'DC=corp,DC=local', str(tmp_path), Cache())
+    node = json.loads((tmp_path / 'CATemplate.json').read_text())['data'][0]
+    assert node['Properties']['enrolleesuppliessubject'] is False
+    assert node['Properties']['certificatenameflags'] == ['SUBJECT_ALT_REQUIRE_DOMAIN_DNS']
+    assert 'ESC1' not in node['Properties']['esc_findings']
+
+
+@pytest.mark.parametrize('policy_oids,expected_groups', [
+    ([], []),
+    (['1.2.3.99'], []),
+    (['1.2.3.10'], ['CN=GroupA,DC=corp,DC=local']),
+    (['1.2.3.99', '1.2.3.10'], ['CN=GroupA,DC=corp,DC=local']),
+    (['1.2.3.10', '1.2.3.11'], ['CN=GroupA,DC=corp,DC=local', 'CN=GroupB,DC=corp,DC=local']),
+])
+def test_esc13_joins_all_issuance_policies_not_template_oid(tmp_path, policy_oids, expected_groups):
+    template = _esc1_template()
+    template.attributes['msPKI-Certificate-Name-Flag'] = [0]
+    template.attributes['msPKI-Certificate-Policy'] = policy_oids
+    template_oid = template.attributes['msPKI-Cert-Template-OID'][0]
+    policies = [AdObject('mspki-enterprise-oid', {
+        'msPKI-Cert-Template-OID': [oid], 'msDS-OIDToGroupLink': [group],
+    }) for oid, group in [
+        ('1.2.3.10', 'CN=GroupA,DC=corp,DC=local'),
+        ('1.2.3.11', 'CN=GroupB,DC=corp,DC=local'),
+        (template_oid, 'CN=WrongJoin,DC=corp,DC=local'),
+    ]]
+    client = _StubClient([_ca_entry(), template, *policies])
+    certdump(client, 'DC=corp,DC=local', str(tmp_path), Cache())
+    props = json.loads((tmp_path / 'CATemplate.json').read_text())['data'][0]['Properties']
+    assert ('ESC13' in props['esc_findings']) is bool(expected_groups)
+    assert props['issuancepolicies'] == sorted(set(policy_oids))
+    assert props['esc13_group_dns'] == expected_groups
+    assert props['esc13_group_dn'] == (expected_groups[0] if expected_groups else None)
+    assert props['certificate_oid'] == template_oid
+    template_call = next(c for c in client.calls if c['ldap_filter'] == '(objectClass=pKICertificateTemplate)')
+    assert 'msPKI-Certificate-Policy' in template_call['attributes']
+    if expected_groups:
+        finding = json.loads((tmp_path / 'ADCSFindings.json').read_text())['data'][0]
+        assert finding['esc13_group_dns'] == expected_groups
+        assert finding['issuance_policies'] == sorted(set(policy_oids))
+
+
+@pytest.mark.parametrize('enrollment_flag,signatures,published,has_enroll,eku,expected', [
+    (0, 0, True, True, '1.3.6.1.5.5.7.3.2', True),
+    (2, 0, True, True, '1.3.6.1.5.5.7.3.2', False),
+    (0, 1, True, True, '1.3.6.1.5.5.7.3.2', False),
+    (0, 0, False, True, '1.3.6.1.5.5.7.3.2', False),
+    (0, 0, True, False, '1.3.6.1.5.5.7.3.2', False),
+    (0, 0, True, True, '1.3.6.1.5.5.7.3.1', False),
+])
+def test_esc13_requires_enrollment_authentication_and_issuance(
+        tmp_path, enrollment_flag, signatures, published, has_enroll, eku, expected):
+    template = _esc1_template()
+    template.attributes.update({
+        'msPKI-Certificate-Policy': ['1.2.3.10'],
+        'msPKI-Enrollment-Flag': [enrollment_flag], 'msPKI-RA-Signature': [signatures],
+        'pKIExtendedKeyUsage': [eku],
+    })
+    if not has_enroll:
+        template.attributes.pop('nTSecurityDescriptor')
+    policy = AdObject('mspki-enterprise-oid', {
+        'msPKI-Cert-Template-OID': ['1.2.3.10'],
+        'msDS-OIDToGroupLink': ['CN=GroupA,DC=corp,DC=local'],
+    })
+    ca = _ca_entry(templates=('ESC1-vuln',) if published else ())
+    certdump(_StubClient([ca, template, policy]), 'DC=corp,DC=local', str(tmp_path), Cache())
+    props = json.loads((tmp_path / 'CATemplate.json').read_text())['data'][0]['Properties']
+    assert ('ESC13' in props['esc_findings']) is expected
+
+
+@pytest.mark.parametrize('ekus,expected', [
+    (['1.3.6.1.5.5.7.3.1'], True),
+    (['1.3.6.1.5.5.7.3.2'], False),
+    (['1.3.6.1.5.5.7.3.1', '1.3.6.1.5.5.7.3.2'], True),
+    (['2.5.29.37.0'], True), ([], True),
+    (['1.3.6.1.4.1.311.20.2.1'], False),
+])
+def test_esc17_requires_server_authentication(tmp_path, ekus, expected):
+    template = _esc1_template()
+    template.attributes['pKIExtendedKeyUsage'] = ekus
+    certdump(_StubClient([_ca_entry(), template]), 'DC=corp,DC=local', str(tmp_path), Cache())
+    props = json.loads((tmp_path / 'CATemplate.json').read_text())['data'][0]['Properties']
+    assert ('ESC17' in props['esc_findings']) is expected
+    if expected:
+        row = json.loads((tmp_path / 'ADCSFindings.json').read_text())['data'][0]
+        assert row['principals_by_finding']['ESC17'] == [DOMAIN_USERS_SID]
+
+
+@pytest.mark.parametrize('flag,approval,signatures,published,has_enroll', [
+    (0, 0, 0, True, True), (0x10000, 0, 0, True, True),
+    (1, 2, 0, True, True), (1, 0, 1, True, True),
+    (1, 0, 0, False, True), (1, 0, 0, True, False),
+])
+def test_esc17_respects_subject_and_enrollment_requirements(
+        tmp_path, flag, approval, signatures, published, has_enroll):
+    template = _esc1_template()
+    template.attributes.update({'pKIExtendedKeyUsage': ['1.3.6.1.5.5.7.3.1'],
+        'msPKI-Certificate-Name-Flag': [flag], 'msPKI-Enrollment-Flag': [approval],
+        'msPKI-RA-Signature': [signatures]})
+    if not has_enroll:
+        template.attributes.pop('nTSecurityDescriptor')
+    ca = _ca_entry(templates=('ESC1-vuln',) if published else ())
+    certdump(_StubClient([ca, template]), 'DC=corp,DC=local', str(tmp_path), Cache())
+    props = json.loads((tmp_path / 'CATemplate.json').read_text())['data'][0]['Properties']
+    assert 'ESC17' not in props['esc_findings']

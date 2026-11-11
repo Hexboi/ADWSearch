@@ -133,3 +133,101 @@ def test_adcs_dump_when_ca_is_present(lab_client, lab_settings, tmp_path):
     actual = {value.upper() for node in payload['data'] for value in node['Properties']['certthumbprints']}
     assert actual == expected
     assert counts['ntauth'] == len(expected)
+
+
+@pytest.mark.parametrize('page_size,sleep,jitter', [(1, 0, 0), (7, 0, 0), (256, 5, 2)])
+def test_certdump_cli_paging_and_analysis_match_ldap(
+        lab_client, lab_settings, monkeypatch, tmp_path, record_property, page_size, sleep, jitter):
+    from adwsearch import cli
+    import socket
+    from adwsearch.soap import templates
+    from tests.test_dump_adcs_flags import NAME_FLAGS_MS_CRTD_2_28
+
+    s = lab_settings
+    config = 'CN=Configuration,' + s.base
+    cas = ldap_query(config, '(objectClass=pKIEnrollmentService)',
+                     attributes=['name', 'certificateTemplates'])
+    if not cas:
+        pytest.skip('no Enterprise CA in this lab')
+    attrs = ['name', 'objectGUID', 'msPKI-Certificate-Name-Flag',
+             'msPKI-Enrollment-Flag', 'msPKI-RA-Signature', 'pKIExtendedKeyUsage',
+             'msPKI-Certificate-Policy']
+    reference = ldap_query(config, '(objectClass=pKICertificateTemplate)', attributes=attrs)
+    oid_reference = ldap_query(config, '(objectClass=msPKI-Enterprise-Oid)',
+                               attributes=['msPKI-Cert-Template-OID', 'msDS-OIDToGroupLink'])
+    group_links = {r.attributes['msPKI-Cert-Template-OID'][0]: r.attributes['msDS-OIDToGroupLink'][0]
+                   for r in oid_reference if r.attributes.get('msPKI-Cert-Template-OID')
+                   and r.attributes.get('msDS-OIDToGroupLink')}
+    cache = build_cache(lab_client, s.base)
+    cache_path = tmp_path / 'cache.json'
+    cache.serialize(str(cache_path))
+    wire_sizes = []
+    destinations = []
+    original_socket = socket.socket.connect
+
+    def dc_adws_only(sock, address):
+        assert address == (s.ip, 9389)
+        destinations.append(address)
+        return original_socket(sock, address)
+
+    monkeypatch.setattr(socket.socket, 'connect', dc_adws_only)
+    original = templates.pull_request
+
+    def measured_pull(host, context, max_elements, *args, **kwargs):
+        wire_sizes.append(max_elements)
+        return original(host, context, max_elements, *args, **kwargs)
+
+    monkeypatch.setattr(templates, 'pull_request', measured_pull)
+    monkeypatch.setattr(cli.getpass, 'getpass', lambda prompt: s.password)
+    assert cli.main(['-H', s.host, '--dc-ip', s.ip, '-u', s.user, '-d', s.domain, '-W',
+                     '-b', s.base, '--dump', 'certdump', '--cachefile', str(cache_path),
+                     '--outdir', str(tmp_path), '--page-size', str(page_size),
+                     '--sleep', str(sleep), '--jitter', str(jitter)]) == 0
+    assert wire_sizes and set(wire_sizes) == {page_size}
+    assert destinations
+    payload = json.loads((tmp_path / 'CATemplate.json').read_text())
+    by_id = {n['ObjectIdentifier']: n for n in payload['data']}
+    assert len(by_id) == len(reference) == payload['meta']['count']
+    published = {str(name).upper() for ca in cas for name in ca.attributes.get('certificateTemplates', [])}
+    expected_findings = {'ESC1': set(), 'ESC13': set(), 'ESC17': set()}
+    low_priv_sids = {'S-1-1-0', 'S-1-5-11', cache.lookup_by_dn(s.base)[0] + '-513'}
+    for entry in reference:
+        a = entry.attributes
+        pki_id = str(uuid.UUID(bytes_le=a['objectGUID'][0])).upper()
+        node = by_id[pki_id]
+        props = node['Properties']
+        name_flag = int(a['msPKI-Certificate-Name-Flag'][0]) & 0xffffffff
+        enrollment_flag = int(a['msPKI-Enrollment-Flag'][0]) & 0xffffffff
+        signatures = int((a.get('msPKI-RA-Signature') or [0])[0])
+        ekus = set(a.get('pKIExtendedKeyUsage') or [])
+        assert props['certificatenameflag'] == name_flag
+        assert set(props['certificatenameflags']) == {name for bit, name in NAME_FLAGS_MS_CRTD_2_28 if name_flag & bit}
+        assert props['enabled'] == (a['name'][0].upper() in published)
+        assert props['requiresmanagerapproval'] == bool(enrollment_flag & 2)
+        assert props['authorizedsignatures'] == signatures
+        assert set(props['extendedkeyusage']) == ekus
+        policies = sorted(set(a.get('msPKI-Certificate-Policy') or []))
+        groups = sorted({group_links[oid] for oid in policies if oid in group_links})
+        assert props['issuancepolicies'] == policies
+        assert props['esc13_group_dns'] == groups
+        can_enroll = any(ace['PrincipalSID'] in low_priv_sids and ace['RightName'] in
+                         ('Enroll', 'AllExtendedRights', 'GenericAll') for ace in node['Aces'])
+        auth_capable = not ekus or bool(ekus & {'1.3.6.1.5.5.7.3.2', '1.3.6.1.5.2.3.4',
+                                             '1.3.6.1.4.1.311.20.2.2', '2.5.29.37.0'})
+        if props['enabled'] and not enrollment_flag & 2 and not signatures and can_enroll:
+            if name_flag & 1 and auth_capable:
+                expected_findings['ESC1'].add(a['name'][0])
+            if groups and auth_capable:
+                expected_findings['ESC13'].add(a['name'][0])
+            server_auth = not ekus or bool(ekus & {'1.3.6.1.5.5.7.3.1', '2.5.29.37.0'})
+            if name_flag & 1 and server_auth:
+                expected_findings['ESC17'].add(a['name'][0])
+    findings = json.loads((tmp_path / 'ADCSFindings.json').read_text())
+    for esc, expected in expected_findings.items():
+        actual = {row['template'] for row in findings['data'] if row['kind'] == 'template' and esc in row['findings']}
+        assert expected <= actual
+    record_property('max_elements', page_size)
+    record_property('pull_count', len(wire_sizes))
+    record_property('templates_checked', len(reference))
+    record_property('low_priv_templates', {esc: sorted(names) for esc, names in expected_findings.items()})
+    record_property('adws_destinations', destinations)

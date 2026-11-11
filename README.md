@@ -179,20 +179,44 @@ Then choose the export you need, using the cache for the same domain:
 # Objects and relationships for BloodHound
 adwsearch -H dc01.corp.local -u alice@corp.local -W -b "DC=corp,DC=local" --dump bhdump --cachefile corp-cache.json --outdir bh-out
 
-# AD CS configuration and potential findings
-adwsearch -H dc01.corp.local -u alice@corp.local -W -b "DC=corp,DC=local" --dump certdump --cachefile corp-cache.json --outdir adcs-out
+# AD CS configuration and potential findings, including ESC13 and ESC17
+adwsearch -H dc01.corp.local -u alice@corp.local -W -b "DC=corp,DC=local" --dump certdump --cachefile corp-cache.json --outdir adcs-out --page-size 32
 
 # Local statistics, without a domain connection
 adwsearch --dump showstats --cachefile corp-cache.json
 ```
 
-`--page-size N` controls the number of objects requested per page for both
-`buildcache` and `bhdump`, including every `--autosplit` slice (CLI default: 256).
+`--page-size N` controls the number of objects requested per page for
+`buildcache`, `bhdump`, and `certdump`, including every `--autosplit` slice
+of `bhdump` and the CA/template/OID queries of `certdump` (CLI default: 256).
 Smaller pages reduce response size; they do not limit the total collection.
 `-z/--sizelimit` applies to ordinary searches; dumps collect all objects under
 the selected base. `--autosplit` divides `bhdump` by name prefix and preserves
 the complete result set. `--sleep 5 --jitter 2` adds a 5–7 second pause between
 requests; smaller pages and autosplit require more requests and thus more time.
+
+`certdump` writes `CA.json`, `CATemplate.json`, and `NTAuthCertificates.json` for
+BloodHound, plus `ADCSFindings.json` for reviewing potential issues directly.
+The additional template checks include:
+
+| Check | Directory conditions |
+| --- | --- |
+| ESC13 | Client authentication and an issuance policy from `msPKI-Certificate-Policy` linked through its OID object to a group via `msDS-OIDToGroupLink`. All policy values and linked groups are considered. |
+| ESC17 | Enrollee-supplied subject and Server Authentication capability. Any Purpose and absent EKUs also permit server authentication. |
+
+Both checks require publication on an enumerated CA, enrollment rights for a
+non-privileged principal, no manager approval, and no authorized signatures.
+The template identifier OID stays separate from issuance policy OIDs. Template
+JSON includes `issuancepolicies` and `esc13_group_dns`; findings include
+`issuance_policies` and `esc13_group_dns`. The legacy `esc13_group_dn` field
+contains the first linked group, when present.
+
+Collection reads directory data only through ADWS on the DC (TCP 9389). It does
+not contact CA RPC/HTTP endpoints or request certificates. Findings describe
+directory prerequisites; they do not prove successful issuance, exploitation,
+or the state of CA service settings and patches. Kerberos authentication may
+separately contact the KDC. The issuance-policy ACL audit is a separate check
+and is not part of this ESC13 template-to-policy-to-group correlation.
 
 ## Development and tests
 

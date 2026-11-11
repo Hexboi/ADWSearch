@@ -6,7 +6,7 @@
 Produces BloodHound-CE v5 compatible JSON for CAs and templates, enriched with
 the boolean properties (``enrolleesuppliessubject``, ``nosecurityextension``,
 ``effectiveekus`` ...) that BHCE's cypher queries need to materialise the
-``ADCSESC1..15`` edges. Also writes two operator-oriented files:
+``ADCSESC*`` edges. Also writes two operator-oriented files:
 
 * ``NTAuthCertificates.json`` -- parsed CA certs trusted for client auth.
 * ``ADCSFindings.json`` -- flat list of templates with the ESCx verdicts.
@@ -80,6 +80,7 @@ _TEMPLATE_ATTRS = [
     "msPKI-RA-Signature",
     "msPKI-Template-Schema-Version",
     "msPKI-Cert-Template-OID",
+    "msPKI-Certificate-Policy",
     "pKIExtendedKeyUsage",
     "pKIOverlapPeriod",
     "pKIExpirationPeriod",
@@ -349,7 +350,7 @@ def _classify_template(
     schema_version: int,
     ra_signature: int,
     enabled: bool,
-    esc13_group_dn: str | None,
+    esc13_group_dns: list[str],
     dc_sids: set[str],
 ) -> tuple[list[str], dict[str, list[str]]]:
     """Compute ESCx verdicts for a template.
@@ -365,16 +366,13 @@ def _classify_template(
     principals: dict[str, list[str]] = {}
 
     enroll_principals = _non_priv_principals(
-        aces, {"Enroll", "AutoEnroll", "GenericAll", "GenericWrite"}, dc_sids
+        aces, {"Enroll", "AutoEnroll", "AllExtendedRights", "GenericAll", "GenericWrite"}, dc_sids
     )
     full_control_principals = _non_priv_principals(
         aces, {"Owns", "GenericAll", "WriteDacl", "WriteOwner", "GenericWrite"}, dc_sids
     )
 
-    enrollee_supplies_subject = (
-        "ENROLLEE_SUPPLIES_SUBJECT" in name_flags
-        or "ENROLLEE_SUPPLIES_SUBJECT_ALT_NAME" in name_flags
-    )
+    enrollee_supplies_subject = "ENROLLEE_SUPPLIES_SUBJECT" in name_flags
     requires_manager_approval = "PEND_ALL_REQUESTS" in enroll_flags
     no_security_extension = "NO_SECURITY_EXTENSION" in enroll_flags
     auth_capable = eku_grants_authentication(ekus)
@@ -415,7 +413,8 @@ def _classify_template(
         findings.append("ESC9")
         principals["ESC9"] = enroll_principals
 
-    if enroll_principals and esc13_group_dn and auth_capable:
+    if (enroll_principals and esc13_group_dns and auth_capable
+            and not requires_manager_approval and ra_signature == 0):
         findings.append("ESC13")
         principals["ESC13"] = enroll_principals
 
@@ -427,6 +426,12 @@ def _classify_template(
     ):
         findings.append("ESC15")
         principals["ESC15"] = enroll_principals
+
+    server_auth_capable = not ekus or has_any_purpose or eku_contains(ekus, "1.3.6.1.5.5.7.3.1")
+    if (enroll_principals and enrollee_supplies_subject and server_auth_capable
+            and not requires_manager_approval and ra_signature == 0):
+        findings.append("ESC17")
+        principals["ESC17"] = enroll_principals
 
     return findings, principals
 
@@ -468,9 +473,9 @@ def _make_template_node(
     enabled = bool(cas_publishing)
 
     template_oid = _first(attrs.get("msPKI-Cert-Template-OID") or []) or ""
-    esc13_group_dn = (
-        oid_group_links.get(str(template_oid).strip()) if template_oid else None
-    )
+    issuance_policies = sorted({str(oid).strip() for oid in
+                                (attrs.get("msPKI-Certificate-Policy") or []) if str(oid).strip()})
+    esc13_group_dns = sorted({oid_group_links[oid] for oid in issuance_policies if oid in oid_group_links})
 
     findings, principals = _classify_template(
         name_flags,
@@ -480,7 +485,7 @@ def _make_template_node(
         schema_v,
         ra_sig,
         enabled,
-        esc13_group_dn,
+        esc13_group_dns,
         dc_sids,
     )
 
@@ -512,15 +517,16 @@ def _make_template_node(
             "privatekeyflags": pkey_flags,
             "effectiveekus": [e["name"] for e in ekus],
             "ekus_detail": ekus,
-            "enrolleesuppliessubject": "ENROLLEE_SUPPLIES_SUBJECT" in name_flags
-            or "ENROLLEE_SUPPLIES_SUBJECT_ALT_NAME" in name_flags,
+            "enrolleesuppliessubject": "ENROLLEE_SUPPLIES_SUBJECT" in name_flags,
             "requiresmanagerapproval": "PEND_ALL_REQUESTS" in enroll_flags,
             "nosecurityextension": "NO_SECURITY_EXTENSION" in enroll_flags,
             "authenticationenabled": eku_grants_authentication(ekus),
             "enabled": enabled,
             "published_on": cas_publishing,
             "certificate_oid": str(template_oid),
-            "esc13_group_dn": esc13_group_dn,
+            "issuancepolicies": issuance_policies,
+            "esc13_group_dns": esc13_group_dns,
+            "esc13_group_dn": esc13_group_dns[0] if esc13_group_dns else None,
             "esc_findings": findings,
         },
         "Aces": aces,
@@ -530,14 +536,14 @@ def _make_template_node(
     }
 
 
-def _run_query(client, base: str, ldap_filter: str, attrs: list[str]):
+def _run_query(client, base: str, ldap_filter: str, attrs: list[str], page_size: int):
     yield from client.search(
         base=base,
         scope="sub",
         ldap_filter=ldap_filter,
         attributes=attrs,
         size_limit=0,
-        page_size=500,
+        page_size=page_size,
         ldap_controls=[(SD_FLAGS_OID, SD_FLAGS_ALL)],
     )
 
@@ -628,8 +634,8 @@ def _build_ntauth_store(certs: list[dict], cas: list[dict], base: str) -> list[d
     ]
 
 
-def _fetch_oid_group_links(client, base: str) -> dict[str, str]:
-    """ESC13 ground truth: map msPKI-Cert-Template-OID -> linked group DN."""
+def _fetch_oid_group_links(client, base: str, page_size: int) -> dict[str, str]:
+    """Map each issuance policy object's OID value to its linked group DN."""
     oid_base = f"CN=OID,CN=Public Key Services,CN=Services,CN=Configuration,{base}"
     links: dict[str, str] = {}
     try:
@@ -644,7 +650,7 @@ def _fetch_oid_group_links(client, base: str) -> dict[str, str]:
                 "displayName",
             ],
             size_limit=0,
-            page_size=500,
+            page_size=page_size,
         )
         # Consume within this try: generators can fail after returning a page.
         for e in entries:
@@ -700,6 +706,8 @@ def _findings_summary(cas: list[dict], templates: list[dict]) -> list[dict]:
                 "schemaversion": props.get("schemaversion"),
                 "effectiveekus": props.get("effectiveekus") or [],
                 "esc13_group_dn": props.get("esc13_group_dn"),
+                "esc13_group_dns": props.get("esc13_group_dns") or [],
+                "issuance_policies": props.get("issuancepolicies") or [],
             }
         )
     return out
@@ -716,7 +724,7 @@ def _write_json(outdir: str, filename: str, data: Any, meta: dict | None = None)
         json.dump(payload, stream, indent=2, sort_keys=False, default=str)
 
 
-def _collect_certdump(client, base: str, outdir: str, cache, stack) -> dict[str, int]:
+def _collect_certdump(client, base: str, outdir: str, cache, stack, page_size: int) -> dict[str, int]:
     """Enumerate ADCS CAs + templates and write BH-CE compatible JSON.
 
     Produces: ``CA.json``, ``CATemplate.json``, ``NTAuthCertificates.json``,
@@ -733,7 +741,7 @@ def _collect_certdump(client, base: str, outdir: str, cache, stack) -> dict[str,
 
     cas = stack.enter_context(JsonSpool(outdir))
     for entry in _run_query(
-        client, config_base, "(objectClass=pKIEnrollmentService)", _CA_ATTRS
+        client, config_base, "(objectClass=pKIEnrollmentService)", _CA_ATTRS, page_size
     ):
         try:
             node = _make_ca_node(entry, cache, dc_sids)
@@ -747,11 +755,11 @@ def _collect_certdump(client, base: str, outdir: str, cache, stack) -> dict[str,
         cas.append(node)
 
     published_on = _build_published_map(cas)
-    oid_group_links = _fetch_oid_group_links(client, base)
+    oid_group_links = _fetch_oid_group_links(client, base, page_size)
 
     templates = stack.enter_context(JsonSpool(outdir))
     for entry in _run_query(
-        client, config_base, "(objectClass=pKICertificateTemplate)", _TEMPLATE_ATTRS
+        client, config_base, "(objectClass=pKICertificateTemplate)", _TEMPLATE_ATTRS, page_size
     ):
         try:
             node = _make_template_node(entry, cache, published_on, oid_group_links, dc_sids)
@@ -892,8 +900,8 @@ def _collect_certdump(client, base: str, outdir: str, cache, stack) -> dict[str,
     return counts
 
 
-def certdump(client, base: str, outdir: str, cache) -> dict[str, int]:
+def certdump(client, base: str, outdir: str, cache, *, page_size: int = 500) -> dict[str, int]:
     """Collect ADCS nodes into disk-backed spools, then publish complete files."""
     os.makedirs(outdir, exist_ok=True)
     with ExitStack() as stack:
-        return _collect_certdump(client, base, outdir, cache, stack)
+        return _collect_certdump(client, base, outdir, cache, stack, page_size)
